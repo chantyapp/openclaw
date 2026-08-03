@@ -1,0 +1,1974 @@
+// Chanty plugin module implements monitor behavior.
+import { defineFinalizableLivePreviewAdapter, deliverWithFinalizableLivePreviewAdapter, } from "openclaw/plugin-sdk/channel-outbound";
+import { buildChannelProgressDraftLineForEntry, createChannelProgressDraftCompositor, resolveChannelStreamingPreviewToolProgress, } from "openclaw/plugin-sdk/channel-outbound";
+import { createClaimableDedupe } from "openclaw/plugin-sdk/persistent-dedupe";
+import { buildTtsSupplementMediaPayload, getReplyPayloadTtsSupplement, isReasoningReplyPayload, } from "openclaw/plugin-sdk/reply-payload";
+import { resolveInboundLastRouteSessionKey } from "openclaw/plugin-sdk/routing";
+import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
+import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
+import { normalizeLowercaseStringOrEmpty, normalizeOptionalString, normalizeTrimmedStringList, uniqueStrings, } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { getChantyRuntime } from "../runtime.js";
+import { resolveChantyAccount, resolveChantyReplyToMode, } from "./accounts.js";
+import { createChantyClient, fetchChantyMe, normalizeChantyBaseUrl, updateChantyPost, } from "./client.js";
+import { createChantyDraftStream } from "./draft-stream.js";
+import { normalizeChantyAllowEntry, resolveChantyMonitorInboundAccess, } from "./monitor-auth.js";
+import { mapChantyChannelTypeToChatType, resolveChantyTrustedChatKind, } from "./monitor-gating.js";
+import { formatInboundFromLabel, normalizeMention, resolveThreadSessionKeys, shouldDropEmptyChantyBody, } from "./monitor-helpers.js";
+import { resolveOncharPrefixes, stripOncharPrefix } from "./monitor-onchar.js";
+import { createChantyMonitorResources, formatChantyInboundMediaText, } from "./monitor-resources.js";
+// import { registerChantyMonitorSlashCommands } from "./monitor-slash.js";
+import { createChantyConnectOnce, } from "./monitor-websocket.js";
+import { evaluateChantyNoVisibleReply, formatChantyNoVisibleReplyLog, } from "./no-visible-reply-diagnostic.js";
+import { runWithReconnect } from "./reconnect.js";
+import { createChantyReplyDeliveryBarrier, deliverChantyReplyPayload, } from "./reply-delivery.js";
+import { buildAgentMediaPayload, createChannelHistoryWindow, createChannelPairingController, createChannelMessageReplyPipeline, DEFAULT_GROUP_HISTORY_LIMIT, logTypingFailure, resolveAllowlistProviderRuntimeGroupPolicy, resolveChannelMediaMaxBytes, resolveDefaultGroupPolicy, warnMissingProviderGroupPolicyFallbackOnce, } from "./runtime-api.js";
+import { sendMessageChanty } from "./send.js";
+// import { cleanupSlashCommands } from "./slash-commands.js";
+// import { deactivateSlashCommands, getSlashCommandState } from "./slash-state.js";
+import { hasChantyThreadParticipationWithPersistence, recordChantyThreadParticipation, } from "./thread-participation.js";
+export { evaluateChantyMentionGate, mapChantyChannelTypeToChatType, resolveChantyTrustedChatKind, } from "./monitor-gating.js";
+export function shouldUpdateChantyDraftToolProgress(account) {
+    return (account.streamingMode !== "off" && resolveChannelStreamingPreviewToolProgress(account.config));
+}
+export function shouldSuppressChantyDefaultToolProgressMessages(account) {
+    return account.streamingMode !== "off";
+}
+const RECENT_CHANTY_MESSAGE_TTL_MS = 5 * 60_000;
+const RECENT_CHANTY_MESSAGE_MAX = 2000;
+function normalizeInteractionSourceIps(values) {
+    return normalizeTrimmedStringList(values);
+}
+const recentInboundMessages = createClaimableDedupe({
+    ttlMs: RECENT_CHANTY_MESSAGE_TTL_MS,
+    memoryMaxSize: RECENT_CHANTY_MESSAGE_MAX,
+});
+export class ChantyRetryableInboundError extends Error {
+    constructor(message, options) {
+        super(message, options);
+        this.name = "ChantyRetryableInboundError";
+    }
+}
+export function buildChantyModelPickerSelectMessageSid(params) {
+    const provider = normalizeLowercaseStringOrEmpty(params.provider);
+    const model = normalizeLowercaseStringOrEmpty(params.model);
+    return `interaction:${params.postId}:select:${provider}/${model}`;
+}
+function buildChantyInboundReplayKeys(params) {
+    return uniqueStrings(params.messageIds.map((id) => `${params.accountId}:${id.trim()}`)).filter((key) => !key.endsWith(":"));
+}
+export async function processChantyReplayGuardedPost(params) {
+    /* const replayGuard = params.replayGuard ?? recentInboundMessages;
+    const replayKeys = buildChantyInboundReplayKeys({
+      accountId: params.accountId,
+      messageIds: params.messageIds,
+    });
+    if (replayKeys.length === 0) {
+      await params.handlePost();
+      return "processed";
+    }
+  
+    const claimedKeys: string[] = [];
+    for (const replayKey of replayKeys) {
+      const claim = await replayGuard.claim(replayKey);
+      if (claim.kind === "claimed") {
+        claimedKeys.push(replayKey);
+      }
+    }
+    if (claimedKeys.length === 0) {
+      return "duplicate";
+    } */
+    try {
+        await params.handlePost();
+        // await Promise.all(claimedKeys.map((replayKey) => replayGuard.commit(replayKey)));
+        return "processed";
+    }
+    catch (error) {
+        /* if (error instanceof ChantyRetryableInboundError) {
+          claimedKeys.forEach((replayKey) => replayGuard.release(replayKey, { error }));
+        } else {
+          await Promise.all(claimedKeys.map((replayKey) => replayGuard.commit(replayKey)));
+        } */
+        throw error;
+    }
+}
+function resolveRuntime(opts) {
+    return (opts.runtime ?? {
+        log: console.log,
+        error: console.error,
+        exit: (code) => {
+            throw new Error(`exit ${code}`);
+        },
+    });
+}
+function isSystemPost(post) {
+    return normalizeOptionalString(post.type) !== undefined;
+}
+function channelChatType(kind) {
+    if (kind === "direct") {
+        return "direct";
+    }
+    if (kind === "group") {
+        return "group";
+    }
+    return "channel";
+}
+export function resolveChantyReplyRootId(params) {
+    if (params.kind === "direct") {
+        return undefined;
+    }
+    const threadRootId = normalizeOptionalString(params.threadRootId);
+    if (threadRootId) {
+        return threadRootId;
+    }
+    return normalizeOptionalString(params.replyToId);
+}
+export function canFinalizeChantyPreviewInPlace(params) {
+    return (resolveChantyReplyRootId({
+        kind: params.kind,
+        threadRootId: params.threadRootId,
+        replyToId: params.replyToId,
+    }) === params.previewRootId?.trim());
+}
+function createDisabledChantyDraftStream() {
+    const noopAsync = async () => { };
+    return {
+        update: () => { },
+        flush: noopAsync,
+        postId: () => undefined,
+        clear: noopAsync,
+        discardPending: noopAsync,
+        seal: noopAsync,
+        stop: noopAsync,
+        forceNewMessage: () => { },
+    };
+}
+export async function deliverChantyReplyWithDraftPreview(params) {
+    if (isReasoningReplyPayload(params.payload)) {
+        return;
+    }
+    await deliverWithFinalizableLivePreviewAdapter({
+        kind: params.info.kind,
+        payload: params.payload,
+        adapter: defineFinalizableLivePreviewAdapter({
+            draft: {
+                flush: params.draftStream.flush,
+                clear: params.draftStream.clear,
+                discardPending: params.draftStream.discardPending,
+                seal: params.draftStream.seal,
+                id: params.draftStream.postId,
+            },
+            buildFinalEdit: (payload) => {
+                const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
+                const ttsSupplement = getReplyPayloadTtsSupplement(payload);
+                const previewFinalText = params.resolvePreviewFinalText(payload.text ?? ttsSupplement?.spokenText);
+                if ((hasMedia && !ttsSupplement) ||
+                    typeof previewFinalText !== "string" ||
+                    payload.isError ||
+                    !canFinalizeChantyPreviewInPlace({
+                        kind: params.kind,
+                        previewRootId: params.effectiveReplyToId,
+                        threadRootId: params.effectiveReplyToId,
+                        replyToId: payload.replyToId,
+                    })) {
+                    return undefined;
+                }
+                return { message: previewFinalText };
+            },
+            editFinal: async (previewPostId, edit) => {
+                await updateChantyPost(params.client, previewPostId, edit);
+            },
+            onPreviewFinalized: () => {
+                params.previewState.finalizedViaPreviewPost = true;
+                // The visible final reply landed by editing the preview post, so the normal
+                // deliverPayload record path is skipped; record participation explicitly here.
+                params.recordThreadParticipation?.();
+            },
+            buildSupplementalPayload: (payload) => getReplyPayloadTtsSupplement(payload) ? buildTtsSupplementMediaPayload(payload) : undefined,
+            deliverSupplemental: async (payload) => {
+                await params.deliverPayload(payload);
+            },
+            logPreviewEditFailure: (err) => {
+                params.logVerboseMessage(`chanty preview final edit failed; falling back to normal send (${String(err)})`);
+            },
+        }),
+        deliverNormally: async (payload) => {
+            const supplement = getReplyPayloadTtsSupplement(payload);
+            await params.deliverPayload(supplement && !payload.text?.trim() && supplement.visibleTextAlreadyDelivered !== true
+                ? { ...payload, text: supplement.spokenText }
+                : payload);
+        },
+    });
+}
+export function formatChantyFinalDeliveryOutcomeLog(params) {
+    const violation = evaluateChantyNoVisibleReply({
+        outcome: params.outcome,
+        payload: params.payload,
+    });
+    if (violation) {
+        return formatChantyNoVisibleReplyLog({
+            violation,
+            to: params.to,
+            accountId: params.accountId,
+            agentId: params.agentId,
+        });
+    }
+    if (params.outcome === "text" || params.outcome === "media") {
+        return `delivered reply to ${params.to}`;
+    }
+    return undefined;
+}
+export function resolveChantyEffectiveReplyToId(params) {
+    if (params.kind === "direct") {
+        return undefined;
+    }
+    const threadRootId = normalizeOptionalString(params.threadRootId);
+    if (threadRootId) {
+        return threadRootId;
+    }
+    const postId = normalizeOptionalString(params.postId);
+    if (!postId) {
+        return undefined;
+    }
+    return params.replyToMode === "all" ||
+        params.replyToMode === "first" ||
+        params.replyToMode === "batched"
+        ? postId
+        : undefined;
+}
+export function resolveChantyThreadSessionContext(params) {
+    const effectiveReplyToId = resolveChantyEffectiveReplyToId({
+        kind: params.kind,
+        postId: params.postId,
+        replyToMode: params.replyToMode,
+        threadRootId: params.threadRootId,
+    });
+    const threadKeys = resolveThreadSessionKeys({
+        baseSessionKey: params.baseSessionKey,
+        threadId: effectiveReplyToId,
+        parentSessionKey: effectiveReplyToId ? params.baseSessionKey : undefined,
+    });
+    return {
+        effectiveReplyToId,
+        sessionKey: threadKeys.sessionKey,
+        parentSessionKey: threadKeys.parentSessionKey,
+    };
+}
+export function resolveChantyReactionChannelId(payload) {
+    return (normalizeOptionalString(payload.broadcast?.channel_id) ??
+        normalizeOptionalString(payload.data?.channel_id));
+}
+function buildChantyAttachmentPlaceholder(mediaList) {
+    if (mediaList.length === 0) {
+        return "";
+    }
+    if (mediaList.length === 1) {
+        const kind = mediaList[0].kind === "unknown" ? "document" : mediaList[0].kind;
+        return `<media:${kind}>`;
+    }
+    const allImages = mediaList.every((media) => media.kind === "image");
+    const label = allImages ? "image" : "file";
+    const suffix = mediaList.length === 1 ? label : `${label}s`;
+    const tag = allImages ? "<media:image>" : "<media:document>";
+    return `${tag} (${mediaList.length} ${suffix})`;
+}
+function buildChantyWsUrl(userData, token) {
+    return `${userData.ws}?jid=${encodeURIComponent(userData.user.jid)}&token=${encodeURIComponent(token)}`;
+}
+export async function monitorChantyProvider(opts = {}) {
+    const core = getChantyRuntime();
+    const runtime = resolveRuntime(opts);
+    const cfg = (opts.config ?? core.config.current());
+    const account = resolveChantyAccount({
+        cfg,
+        accountId: opts.accountId,
+    });
+    const pairing = createChannelPairingController({
+        core,
+        channel: "chanty",
+        accountId: account.accountId,
+    });
+    const botToken = normalizeOptionalString(opts.botToken) ?? normalizeOptionalString(account.botToken);
+    if (!botToken) {
+        throw new Error(`Chanty bot token missing for account "${account.accountId}" (set channels.chanty.accounts.${account.accountId}.botToken or CHANTY_BOT_TOKEN for default).`);
+    }
+    const baseUrl = normalizeChantyBaseUrl(opts.baseUrl ?? account.baseUrl);
+    if (!baseUrl) {
+        throw new Error(`Chanty baseUrl missing for account "${account.accountId}" (set channels.chanty.accounts.${account.accountId}.baseUrl or CHANTY_URL for default).`);
+    }
+    const client = createChantyClient({
+        baseUrl,
+        botToken,
+        allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
+    });
+    console.log(client);
+    // Wait for the Chanty API to accept our bot token before proceeding.
+    // When a bot account is disabled and re-enabled, the session is invalidated
+    // and API calls return 401 until the account is fully active again.  Retrying
+    // here (with exponential backoff) keeps the monitor alive and prevents the
+    // framework's auto-restart budget from being exhausted.
+    let botUser;
+    await runWithReconnect(async () => {
+        botUser = await fetchChantyMe(client);
+    }, {
+        abortSignal: opts.abortSignal,
+        jitterRatio: 0.2,
+        shouldReconnect: ({ outcome }) => outcome === "rejected",
+        onError: (err) => {
+            runtime.error?.(`chanty: API auth failed: ${String(err)}`);
+            opts.statusSink?.({ lastError: String(err), connected: false });
+        },
+        onReconnect: (delayMs) => {
+            runtime.log?.(`chanty: API not accessible, retrying in ${Math.round(delayMs / 1000)}s`);
+        },
+    });
+    if (opts.abortSignal?.aborted) {
+        return;
+    }
+    console.log('foo', botUser);
+    const botUserId = botUser?.user?.jid;
+    const botUsername = normalizeOptionalString(botUser?.user?.name);
+    runtime.log?.(`chanty connected as ${botUserId}`);
+    /* await registerChantyMonitorSlashCommands({
+      client,
+      cfg,
+      runtime,
+      account,
+      baseUrl,
+      botUserId,
+    }); */
+    // const slashEnabled = false; //getSlashCommandState(account.accountId) != null;
+    /*
+    // ─── Interactive buttons registration ──────────────────────────────────────
+    // Derive a stable HMAC secret from the bot token so CLI and gateway share it.
+    setInteractionSecret(account.accountId, botToken);
+  
+    // Register HTTP callback endpoint for interactive button clicks.
+    // Chanty POSTs to this URL when a user clicks a button action.
+    const interactionPath = resolveInteractionCallbackPath(account.accountId);
+  
+    // Recompute from config on each monitor start so reconnects or config reloads can refresh the
+    // cached callback URL for downstream callers such as `message action=send`.
+    const callbackUrl = computeInteractionCallbackUrl(account.accountId, {
+      gateway: cfg.gateway,
+      interactions: account.config.interactions,
+    });
+    setInteractionCallbackUrl(account.accountId, callbackUrl);
+    */
+    /* const allowedInteractionSourceIps = normalizeInteractionSourceIps(
+      account.config.interactions?.allowedSourceIps,
+    ); */
+    /*
+    try {
+      const mmHost = new URL(baseUrl).hostname;
+      const callbackHost = new URL(callbackUrl).hostname;
+      //if (isLoopbackHost(callbackHost) && !isLoopbackHost(mmHost)) {
+      //  runtime.error?.(
+      //    `chanty: interactions callbackUrl resolved to ${callbackUrl} (loopback) while baseUrl is ${baseUrl}. This MAY be unreachable depending on your deployment. If button clicks don't work, set channels.chanty.interactions.callbackBaseUrl to a URL reachable from the Chanty server (e.g. your public reverse proxy URL).`,
+      //  );
+      //}
+      if (!isLoopbackHost(callbackHost) && allowedInteractionSourceIps.length === 0) {
+        runtime.error?.(
+          `chanty: interactions callbackUrl resolved to ${callbackUrl} without channels.chanty.interactions.allowedSourceIps. For safety, non-loopback callback sources will be rejected until you allowlist the Chanty server or trusted ingress IPs.`,
+        );
+      }
+    } catch {
+      // URL parse failed; ignore and continue (we will fail naturally if callbacks cannot be delivered).
+    } */
+    /* const effectiveInteractionSourceIps =
+      allowedInteractionSourceIps.length > 0 ? allowedInteractionSourceIps : ["127.0.0.1", "::1"];
+  
+    const unregisterInteractions = registerPluginHttpRoute({
+      path: interactionPath,
+      fallbackPath: "/chanty/interactions/default",
+      auth: "plugin",
+      handler: createChantyInteractionHandler({
+        client,
+        botUserId,
+        accountId: account.accountId,
+        allowedSourceIps: effectiveInteractionSourceIps,
+        trustedProxies: cfg.gateway?.trustedProxies,
+        allowRealIpFallback: cfg.gateway?.allowRealIpFallback === true,
+        handleInteraction: handleModelPickerInteraction,
+        authorizeButtonClick: async ({ payload, post }) => {
+          const channelInfo = await resolveChannelInfo(payload.channel_id);
+          const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
+            cfg,
+            surface: "chanty",
+          });
+          const decision = await authorizeChantyCommandInvocation({
+            account,
+            cfg,
+            senderId: payload.user_id,
+            senderName: payload.user_name ?? "",
+            channelId: payload.channel_id,
+            channelInfo,
+            readStoreAllowFrom: pairing.readAllowFromStore,
+            allowTextCommands,
+            hasControlCommand: false,
+          });
+          if (decision.ok) {
+            return { ok: true };
+          }
+          return {
+            ok: false,
+            response: {
+              update: {
+                message: post.message ?? "",
+                props: post.props ?? undefined,
+              },
+              ephemeral_text: `OpenClaw ignored this action for ${decision.roomLabel}.`,
+            },
+          };
+        },
+        resolveSessionKey: async ({ channelId, userId, post }) => {
+          const channelInfo = await resolveChannelInfo(channelId);
+          if (!channelInfo?.type) {
+            logVerboseMessage(
+              `chanty: drop interaction session event (cannot resolve channel type for ${channelId})`,
+            );
+            throw new Error("Chanty channel type could not be resolved");
+          }
+          const kind = mapChantyChannelTypeToChatType(channelInfo.type);
+          const teamId = channelInfo?.team_id ?? undefined;
+          const route = core.channel.routing.resolveAgentRoute({
+            cfg,
+            channel: "chanty",
+            accountId: account.accountId,
+            teamId,
+            peer: {
+              kind,
+              id: kind === "direct" ? userId : channelId,
+            },
+          });
+          const replyToMode = resolveChantyReplyToMode(account, kind);
+          return resolveChantyThreadSessionContext({
+            baseSessionKey: route.sessionKey,
+            kind,
+            postId: post.id || undefined,
+            replyToMode,
+            threadRootId: post.root_id,
+          }).sessionKey;
+        },
+        dispatchButtonClick: async (optsLocal) => {
+          const channelInfo = await resolveChannelInfo(optsLocal.channelId);
+          if (!channelInfo?.type) {
+            logVerboseMessage(
+              `chanty: drop interaction dispatch (cannot resolve channel type for ${optsLocal.channelId})`,
+            );
+            return;
+          }
+          const kind = mapChantyChannelTypeToChatType(channelInfo.type);
+          const chatType = channelChatType(kind);
+          const teamId = channelInfo?.team_id ?? undefined;
+          const channelName = channelInfo?.name ?? undefined;
+          const channelDisplay = channelInfo?.display_name ?? channelName ?? optsLocal.channelId;
+          const route = core.channel.routing.resolveAgentRoute({
+            cfg,
+            channel: "chanty",
+            accountId: account.accountId,
+            teamId,
+            peer: {
+              kind,
+              id: kind === "direct" ? optsLocal.userId : optsLocal.channelId,
+            },
+          });
+          const replyToMode = resolveChantyReplyToMode(account, kind);
+          const threadContext = resolveChantyThreadSessionContext({
+            baseSessionKey: route.sessionKey,
+            kind,
+            postId: optsLocal.post.id || optsLocal.postId,
+            replyToMode,
+            threadRootId: optsLocal.post.root_id,
+          });
+          const to =
+            kind === "direct" ? `user:${optsLocal.userId}` : `channel:${optsLocal.channelId}`;
+          const bodyText = `[Button click: user @${optsLocal.userName} selected "${optsLocal.actionName}"]`;
+          const ctxPayload = core.channel.reply.finalizeInboundContext({
+            Body: bodyText,
+            BodyForAgent: bodyText,
+            RawBody: bodyText,
+            CommandBody: bodyText,
+            From:
+              kind === "direct"
+                ? `chanty:${optsLocal.userId}`
+                : kind === "group"
+                  ? `chanty:group:${optsLocal.channelId}`
+                  : `chanty:channel:${optsLocal.channelId}`,
+            To: to,
+            SessionKey: threadContext.sessionKey,
+            ParentSessionKey: threadContext.parentSessionKey,
+            AccountId: route.accountId,
+            ChatType: chatType,
+            ConversationLabel: `chanty:${optsLocal.userName}`,
+            GroupSubject: kind !== "direct" ? channelDisplay : undefined,
+            GroupChannel: channelName ? `#${channelName}` : undefined,
+            GroupSpace: teamId,
+            SenderName: optsLocal.userName,
+            SenderId: optsLocal.userId,
+            Provider: "chanty" as const,
+            Surface: "chanty" as const,
+            MessageSid: `interaction:${optsLocal.postId}:${optsLocal.actionId}`,
+            ReplyToId: threadContext.effectiveReplyToId,
+            MessageThreadId: threadContext.effectiveReplyToId,
+            WasMentioned: true,
+            CommandAuthorized: false,
+            OriginatingChannel: "chanty" as const,
+            OriginatingTo: to,
+          });
+  
+          const textLimit = core.channel.text.resolveTextChunkLimit(
+            cfg,
+            "chanty",
+            account.accountId,
+            { fallbackLimit: account.textChunkLimit ?? 4000 },
+          );
+          const tableMode = core.channel.text.resolveMarkdownTableMode({
+            cfg,
+            channel: "chanty",
+            accountId: account.accountId,
+          });
+          const { onModelSelected, typingCallbacks, ...replyPipeline } =
+            createChannelMessageReplyPipeline({
+              cfg,
+              agentId: route.agentId,
+              channel: "chanty",
+              accountId: account.accountId,
+              typing: {
+                start: () =>
+                  sendTypingIndicator(optsLocal.channelId, threadContext.effectiveReplyToId),
+                onStartError: (err) => {
+                  logTypingFailure({
+                    log: (message) => logger.debug?.(message),
+                    channel: "chanty",
+                    target: optsLocal.channelId,
+                    error: err,
+                  });
+                },
+              },
+            });
+          const deliveryBarrier = createChantyReplyDeliveryBarrier({
+            isDirect: kind === "direct",
+            dmRetryOptions: account.config.dmChannelRetry,
+          });
+          const { dispatcher, replyOptions, markDispatchIdle } =
+            core.channel.reply.createReplyDispatcherWithTyping({
+              ...replyPipeline,
+              resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
+              onDeliverySettled: deliveryBarrier.markDeliverySettled,
+              humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
+              deliver: async (payload: ReplyPayload) => {
+                await deliverChantyReplyPayload({
+                  core,
+                  cfg,
+                  payload,
+                  to,
+                  accountId: account.accountId,
+                  agentId: route.agentId,
+                  replyToId: resolveChantyReplyRootId({
+                    kind,
+                    threadRootId: threadContext.effectiveReplyToId,
+                    replyToId: payload.replyToId,
+                  }),
+                  textLimit,
+                  tableMode,
+                  sendMessage: sendMessageChanty,
+                  onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
+                });
+                runtime.log?.(`delivered button-click reply to ${to}`);
+              },
+              onError: (err, info) => {
+                runtime.error?.(`chanty button-click ${info.kind} reply failed: ${String(err)}`);
+              },
+              onReplyStart: typingCallbacks?.onReplyStart,
+            });
+  
+          await core.channel.reply.dispatchReplyFromConfig({
+            ctx: ctxPayload,
+            cfg,
+            dispatcher,
+            replyOptions: {
+              ...replyOptions,
+              disableBlockStreaming:
+                typeof account.blockStreaming === "boolean" ? !account.blockStreaming : undefined,
+              onModelSelected,
+            },
+          });
+          markDispatchIdle();
+        },
+        log: (msg) => runtime.log?.(msg),
+      }),
+      pluginId: "chanty",
+      source: "chanty-interactions",
+      accountId: account.accountId,
+      log: (msg: string) => runtime.log?.(msg),
+    }); */
+    const logger = core.logging.getChildLogger({ module: "chanty" });
+    const logVerboseMessage = (message) => {
+        if (!core.logging.shouldLogVerbose()) {
+            return;
+        }
+        logger.debug?.(message);
+    };
+    const mediaMaxBytes = resolveChannelMediaMaxBytes({
+        cfg,
+        resolveChannelLimitMb: () => undefined,
+        accountId: account.accountId,
+    }) ?? 8 * 1024 * 1024;
+    const historyLimit = Math.max(0, cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT);
+    const channelHistories = new Map();
+    const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
+    const dmPolicy = account.config.dmPolicy ?? "pairing";
+    const { groupPolicy, providerMissingFallbackApplied } = resolveAllowlistProviderRuntimeGroupPolicy({
+        providerConfigPresent: cfg.channels?.chanty !== undefined,
+        groupPolicy: account.config.groupPolicy,
+        defaultGroupPolicy,
+    });
+    warnMissingProviderGroupPolicyFallbackOnce({
+        providerMissingFallbackApplied,
+        providerKey: "chanty",
+        accountId: account.accountId,
+        log: (message) => logVerboseMessage(message),
+    });
+    const { resolveChantyMedia, sendTypingIndicator, resolveChannelInfo, resolveUserInfo,
+    // updateModelPickerPost,
+     } = createChantyMonitorResources({
+        accountId: account.accountId,
+        callbackUrl: "", // @todo check
+        client,
+        logger: {
+            debug: (message) => logger.debug?.(String(message)),
+        },
+        mediaMaxBytes,
+        saveRemoteMedia: (params) => core.channel.media.saveRemoteMedia(params),
+        mediaKindFromMime: (contentType) => core.media.mediaKindFromMime(contentType),
+    });
+    console.log(1111111);
+    /* const runModelPickerCommand = async (params: {
+      commandText: string;
+      commandAuthorized: boolean;
+      route: ReturnType<typeof core.channel.routing.resolveAgentRoute>;
+      sessionKey: string;
+      parentSessionKey?: string;
+      channelId: string;
+      senderId: string;
+      senderName: string;
+      kind: ChatType;
+      chatType: "direct" | "group" | "channel";
+      channelName?: string;
+      channelDisplay?: string;
+      roomLabel: string;
+      teamId?: string;
+      postId: string;
+      messageSid?: string;
+      effectiveReplyToId?: string;
+      deliverReplies?: boolean;
+    }): Promise<string> => {
+      const to = params.kind === "direct" ? `user:${params.senderId}` : `channel:${params.channelId}`;
+      const fromLabel =
+        params.kind === "direct"
+          ? `Chanty DM from ${params.senderName}`
+          : `Chanty message in ${params.roomLabel} from ${params.senderName}`;
+      const ctxPayload = core.channel.reply.finalizeInboundContext({
+        Body: params.commandText,
+        BodyForAgent: params.commandText,
+        RawBody: params.commandText,
+        CommandBody: params.commandText,
+        From:
+          params.kind === "direct"
+            ? `chanty:${params.senderId}`
+            : params.kind === "group"
+              ? `chanty:group:${params.channelId}`
+              : `chanty:channel:${params.channelId}`,
+        To: to,
+        SessionKey: params.sessionKey,
+        ParentSessionKey: params.parentSessionKey,
+        AccountId: params.route.accountId,
+        ChatType: params.chatType,
+        ConversationLabel: fromLabel,
+        GroupSubject:
+          params.kind !== "direct" ? params.channelDisplay || params.roomLabel : undefined,
+        GroupChannel: params.channelName ? `#${params.channelName}` : undefined,
+        GroupSpace: params.teamId,
+        SenderName: params.senderName,
+        SenderId: params.senderId,
+        Provider: "chanty" as const,
+        Surface: "chanty" as const,
+        MessageSid: params.messageSid ?? `interaction:${params.postId}:${Date.now()}`,
+        ReplyToId: params.effectiveReplyToId,
+        MessageThreadId: params.effectiveReplyToId,
+        Timestamp: Date.now(),
+        WasMentioned: true,
+        CommandAuthorized: params.commandAuthorized,
+        CommandSource: "native" as const,
+        OriginatingChannel: "chanty" as const,
+        OriginatingTo: to,
+      });
+  
+      const tableMode = core.channel.text.resolveMarkdownTableMode({
+        cfg,
+        channel: "chanty",
+        accountId: account.accountId,
+      });
+      const textLimit = core.channel.text.resolveTextChunkLimit(
+        cfg,
+        "chanty",
+        account.accountId,
+        {
+          fallbackLimit: account.textChunkLimit ?? 4000,
+        },
+      );
+      const shouldDeliverReplies = params.deliverReplies === true;
+      const { onModelSelected, typingCallbacks, ...replyPipeline } =
+        createChannelMessageReplyPipeline({
+          cfg,
+          agentId: params.route.agentId,
+          channel: "chanty",
+          accountId: account.accountId,
+          typing: shouldDeliverReplies
+            ? {
+                start: () => sendTypingIndicator(params.channelId, params.effectiveReplyToId),
+                onStartError: (err) => {
+                  logTypingFailure({
+                    log: (message) => logger.debug?.(message),
+                    channel: "chanty",
+                    target: params.channelId,
+                    error: err,
+                  });
+                },
+              }
+            : undefined,
+        });
+      const capturedTexts: string[] = [];
+      const deliveryBarrier = createChantyReplyDeliveryBarrier({
+        isDirect: params.kind === "direct",
+        dmRetryOptions: account.config.dmChannelRetry,
+      });
+      const { dispatcher, replyOptions, markDispatchIdle } =
+        core.channel.reply.createReplyDispatcherWithTyping({
+          ...replyPipeline,
+          resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
+          onDeliverySettled: deliveryBarrier.markDeliverySettled,
+          // Picker-triggered confirmations should stay immediate.
+          deliver: async (payload: ReplyPayload) => {
+            const trimmedPayload = {
+              ...payload,
+              text: core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode).trim(),
+            };
+  
+            if (!shouldDeliverReplies) {
+              if (trimmedPayload.text) {
+                capturedTexts.push(trimmedPayload.text);
+              }
+              return;
+            }
+  
+            await deliverChantyReplyPayload({
+              core,
+              cfg,
+              payload: trimmedPayload,
+              to,
+              accountId: account.accountId,
+              agentId: params.route.agentId,
+              replyToId: resolveChantyReplyRootId({
+                kind: params.kind,
+                threadRootId: params.effectiveReplyToId,
+                replyToId: trimmedPayload.replyToId,
+              }),
+              textLimit,
+              // The picker path already converts and trims text before capture/delivery.
+              tableMode: "off",
+              sendMessage: sendMessageChanty,
+              onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
+            });
+          },
+          onError: (err, info) => {
+            runtime.error?.(`chanty model picker ${info.kind} reply failed: ${String(err)}`);
+          },
+          onReplyStart: typingCallbacks?.onReplyStart,
+        });
+  
+      await core.channel.reply.withReplyDispatcher({
+        dispatcher,
+        onSettled: () => {
+          markDispatchIdle();
+        },
+        run: () =>
+          core.channel.reply.dispatchReplyFromConfig({
+            ctx: ctxPayload,
+            cfg,
+            dispatcher,
+            replyOptions: {
+              ...replyOptions,
+              disableBlockStreaming:
+                typeof account.blockStreaming === "boolean" ? !account.blockStreaming : undefined,
+              onModelSelected,
+            },
+          }),
+      });
+  
+      return capturedTexts.join("\n\n").trim();
+    }; */
+    /* async function handleModelPickerInteraction(params: {
+      payload: {
+        channel_id: string;
+        post_id: string;
+        team_id?: string;
+        user_id: string;
+      };
+      userName: string;
+      context: Record<string, unknown>;
+      post: ChantyPost;
+    }): Promise<ChantyInteractionResponse | null> {
+      const pickerState = parseChantyModelPickerContext(params.context);
+      if (!pickerState) {
+        return null;
+      }
+  
+      if (pickerState.ownerUserId !== params.payload.user_id) {
+        return {
+          ephemeral_text: "Only the person who opened this picker can use it.",
+        };
+      }
+  
+      const channelInfo = await resolveChannelInfo(params.payload.channel_id);
+      const pickerCommandText =
+        pickerState.action === "select"
+          ? `/model ${pickerState.provider}/${pickerState.model}`
+          : pickerState.action === "list"
+            ? `/models ${pickerState.provider}`
+            : "/models";
+      const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
+        cfg,
+        surface: "chanty",
+      });
+      const hasControlCommand = core.channel.text.hasControlCommand(pickerCommandText, cfg);
+      const auth = await authorizeChantyCommandInvocation({
+        account,
+        cfg,
+        senderId: params.payload.user_id,
+        senderName: params.userName,
+        channelId: params.payload.channel_id,
+        channelInfo,
+        readStoreAllowFrom: pairing.readAllowFromStore,
+        allowTextCommands,
+        hasControlCommand,
+      }) as any;
+      if (!auth.ok) {
+        if (auth.denyReason === "dm-pairing") {
+          const { code } = await pairing.upsertPairingRequest({
+            id: params.payload.user_id,
+            meta: { name: params.userName },
+          });
+          return {
+            ephemeral_text: core.channel.pairing.buildPairingReply({
+              channel: "chanty",
+              idLine: `Your Chanty user id: ${params.payload.user_id}`,
+              code,
+            }),
+          };
+        }
+        const denyText =
+          auth.denyReason === "unknown-channel"
+            ? "Temporary error: unable to determine channel type. Please try again."
+            : auth.denyReason === "dm-disabled"
+              ? "This bot is not accepting direct messages."
+              : auth.denyReason === "channels-disabled"
+                ? "Model picker actions are disabled in channels."
+                : auth.denyReason === "channel-no-allowlist"
+                  ? "Model picker actions are not configured for this channel."
+                  : "Unauthorized.";
+        return {
+          ephemeral_text: denyText,
+        };
+      }
+      const kind = auth.kind;
+      const chatType = auth.chatType;
+      const teamId = auth.channelInfo.team_id ?? params.payload.team_id ?? undefined;
+      const channelName = auth.channelName || undefined;
+      const channelDisplay = auth.channelDisplay || auth.channelName || params.payload.channel_id;
+      const roomLabel = auth.roomLabel;
+      const route = core.channel.routing.resolveAgentRoute({
+        cfg,
+        channel: "chanty",
+        accountId: account.accountId,
+        teamId,
+        peer: {
+          kind,
+          id: kind === "direct" ? params.payload.user_id : params.payload.channel_id,
+        },
+      });
+      const replyToMode = resolveChantyReplyToMode(account, kind);
+      const threadContext = resolveChantyThreadSessionContext({
+        baseSessionKey: route.sessionKey,
+        kind,
+        postId: params.post.id || params.payload.post_id,
+        replyToMode,
+        threadRootId: params.post.root_id,
+      });
+      const modelSessionRoute = {
+        agentId: route.agentId,
+        sessionKey: threadContext.sessionKey,
+      };
+  
+      const data = await buildModelsProviderData(cfg, route.agentId);
+      if (data.providers.length === 0) {
+        return await updateModelPickerPost({
+          channelId: params.payload.channel_id,
+          postId: params.payload.post_id,
+          message: "No models available.",
+        });
+      }
+  
+      if (pickerState.action === "providers" || pickerState.action === "back") {
+        const currentModel = resolveChantyModelPickerCurrentModel({
+          cfg,
+          route: modelSessionRoute,
+          data,
+        });
+        const view = renderChantyProviderPickerView({
+          ownerUserId: pickerState.ownerUserId,
+          data,
+          currentModel,
+        });
+        return await updateModelPickerPost({
+          channelId: params.payload.channel_id,
+          postId: params.payload.post_id,
+          message: view.text,
+          buttons: view.buttons,
+        });
+      }
+  
+      if (pickerState.action === "list") {
+        const currentModel = resolveChantyModelPickerCurrentModel({
+          cfg,
+          route: modelSessionRoute,
+          data,
+        });
+        const view = renderChantyModelsPickerView({
+          ownerUserId: pickerState.ownerUserId,
+          data,
+          provider: pickerState.provider,
+          page: pickerState.page,
+          currentModel,
+        });
+        return await updateModelPickerPost({
+          channelId: params.payload.channel_id,
+          postId: params.payload.post_id,
+          message: view.text,
+          buttons: view.buttons,
+        });
+      }
+  
+      const targetModelRef = `${pickerState.provider}/${pickerState.model}`;
+      if (!buildChantyAllowedModelRefs(data).has(targetModelRef)) {
+        return {
+          ephemeral_text: `That model is no longer available: ${targetModelRef}`,
+        };
+      }
+  
+      void (async () => {
+        try {
+          await runModelPickerCommand({
+            commandText: `/model ${targetModelRef}`,
+            commandAuthorized: auth.commandAuthorized,
+            route,
+            sessionKey: threadContext.sessionKey,
+            parentSessionKey: threadContext.parentSessionKey,
+            channelId: params.payload.channel_id,
+            senderId: params.payload.user_id,
+            senderName: params.userName,
+            kind,
+            chatType,
+            channelName,
+            channelDisplay,
+            roomLabel,
+            teamId,
+            postId: params.payload.post_id,
+            messageSid: buildChantyModelPickerSelectMessageSid({
+              postId: params.payload.post_id,
+              provider: pickerState.provider,
+              model: pickerState.model,
+            }),
+            effectiveReplyToId: threadContext.effectiveReplyToId,
+            deliverReplies: true,
+          });
+          const updatedModel = resolveChantyModelPickerCurrentModel({
+            cfg,
+            route: modelSessionRoute,
+            data,
+            readConsistency: "latest",
+          });
+          const view = renderChantyModelsPickerView({
+            ownerUserId: pickerState.ownerUserId,
+            data,
+            provider: pickerState.provider,
+            page: pickerState.page,
+            currentModel: updatedModel,
+          });
+  
+          await updateModelPickerPost({
+            channelId: params.payload.channel_id,
+            postId: params.payload.post_id,
+            message: view.text,
+            buttons: view.buttons,
+          });
+        } catch (err) {
+          runtime.error?.(`chanty model picker select failed: ${String(err)}`);
+        }
+      })();
+  
+      return {};
+    } */
+    const handlePost = async (
+    // post: ChantyPost,
+    payload, messageIds) => {
+        const post = { ...payload };
+        console.log(1211, 'got message', payload.uri);
+        const channelId = post.convJid; //post.channel_id ?? payload.data?.channel_id ?? payload.broadcast?.channel_id;
+        if (!channelId) {
+            logVerboseMessage("chanty: drop post (missing channel id)");
+            return;
+        }
+        const allMessageIds = messageIds?.length ? messageIds : post.uri ? [post.uri] : [];
+        if (allMessageIds.length === 0) {
+            logVerboseMessage("chanty: drop post (missing message id)");
+            return;
+        }
+        console.log(333);
+        const replayResult = await processChantyReplayGuardedPost({
+            accountId: account.accountId,
+            messageIds: allMessageIds,
+            handlePost: async () => {
+                console.log(1);
+                const senderId = post.createdBy.jid; // post.user_id ?? payload.broadcast?.user_id;
+                if (!senderId) {
+                    logVerboseMessage("chanty: drop post (missing sender id)");
+                    return;
+                }
+                console.log(2);
+                if (senderId === botUserId) {
+                    logVerboseMessage(`chanty: drop post (self sender=${senderId})`);
+                    return;
+                }
+                console.log(3);
+                if (post.msgType !== 'chat') {
+                    return;
+                }
+                /* if (isSystemPost(post)) {
+                  logVerboseMessage(`chanty: drop post (system post type=${post.type ?? "unknown"})`);
+                  return;
+                } */
+                console.log(4);
+                const channelInfo = {}; //await resolveChannelInfo(channelId);
+                const channelType = payload.convType;
+                /* normalizeOptionalString(channelInfo?.type) ??
+                normalizeOptionalString(payload.data?.channel_type); */
+                if (!channelType) {
+                    logVerboseMessage(`chanty: drop post (cannot resolve channel type for ${channelId})`);
+                    return;
+                }
+                const kind = resolveChantyTrustedChatKind({
+                    channelType,
+                });
+                const chatType = channelChatType(kind);
+                const senderName = senderId; /*
+                  normalizeOptionalString(payload.data?.sender_name) ??
+                  normalizeOptionalString((await resolveUserInfo(senderId))?.username) ??
+                  senderId; */
+                console.log(4, senderName, senderId);
+                const rawPostText = post.text; //typeof post.message === "string" ? post.message : "";
+                console.log(5, rawPostText);
+                const rawText = normalizeOptionalString(rawPostText) ?? "";
+                console.log(5);
+                const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
+                    cfg,
+                    surface: "chanty",
+                });
+                const isControlCommand = false; //allowTextCommands && core.channel.commands.isControlCommandMessage(rawText, cfg);
+                console.log(5, allowTextCommands, isControlCommand);
+                const accessDecision = await resolveChantyMonitorInboundAccess({
+                    account,
+                    cfg,
+                    senderId,
+                    senderName,
+                    channelId,
+                    kind,
+                    groupPolicy,
+                    readStoreAllowFrom: pairing.readAllowFromStore,
+                    allowTextCommands,
+                    hasControlCommand: isControlCommand,
+                    eventKind: "message",
+                    mayPair: true,
+                });
+                const commandAuthorized = accessDecision.commandAccess.authorized;
+                console.log(6, accessDecision);
+                /*
+                if (accessDecision.ingress.decision !== "allow") {
+                  if (kind === "direct") {
+                    if (accessDecision.ingress.reasonCode === "dm_policy_disabled") {
+                      logVerboseMessage(`chanty: drop dm (dmPolicy=disabled sender=${senderId})`);
+                      return;
+                    }
+                    if (accessDecision.ingress.decision === "pairing") {
+                      const { code, created } = await pairing.upsertPairingRequest({
+                        id: senderId,
+                        meta: { name: senderName },
+                      });
+                      logVerboseMessage(
+                        `chanty: pairing request sender=${senderId} created=${created}`,
+                      );
+                      if (created) {
+                        try {
+                          await sendMessageChanty(
+                            `user:${senderId}`,
+                            core.channel.pairing.buildPairingReply({
+                              channel: "chanty",
+                              idLine: `Your Chanty user id: ${senderId}`,
+                              code,
+                            }),
+                            { cfg, accountId: account.accountId },
+                          );
+                          opts.statusSink?.({ lastOutboundAt: Date.now() });
+                        } catch (err) {
+                          logVerboseMessage(
+                            `chanty: pairing reply failed for ${senderId}: ${String(err)}`,
+                          );
+                        }
+                      }
+                      return;
+                    }
+                    logVerboseMessage(
+                      formatChantyDirectMessageDropLog({
+                        senderId,
+                        dmPolicy,
+                        reasonCode: accessDecision.senderAccess.reasonCode,
+                      }),
+                    );
+                    return;
+                  }
+                  if (accessDecision.ingress.reasonCode === "group_policy_disabled") {
+                    logVerboseMessage("chanty: drop group message (groupPolicy=disabled)");
+                    return;
+                  }
+                  if (accessDecision.ingress.reasonCode === "group_policy_empty_allowlist") {
+                    logVerboseMessage("chanty: drop group message (no group allowlist)");
+                    return;
+                  }
+                  if (accessDecision.ingress.reasonCode === "group_policy_not_allowlisted") {
+                    logVerboseMessage(`chanty: drop group sender=${senderId} (not in groupAllowFrom)`);
+                    return;
+                  }
+                  logVerboseMessage(
+                    `chanty: drop group message (groupPolicy=${groupPolicy} reason=${accessDecision.senderAccess.reasonCode})`,
+                  );
+                  return;
+                }
+        
+                */
+                /* if (kind !== "direct" && accessDecision.commandAccess.shouldBlockControlCommand) {
+                  logInboundDrop({
+                    log: logVerboseMessage,
+                    channel: "chanty",
+                    reason: "control command (unauthorized)",
+                    target: senderId,
+                  });
+                  return;
+                } */
+                const teamId = undefined; // payload.data?.team_id ?? channelInfo?.team_id ?? undefined;
+                const channelName = payload.convJid; //payload.data?.channel_name ?? channelInfo?.name ?? "";
+                const channelDisplay = payload.convJid;
+                //payload.data?.channel_display_name ?? channelInfo?.display_name ?? channelName;
+                const roomLabel = channelName ? `#${channelName}` : channelDisplay || `#${channelId}`;
+                const route = core.channel.routing.resolveAgentRoute({
+                    cfg,
+                    channel: "chanty",
+                    accountId: account.accountId,
+                    teamId,
+                    peer: {
+                        kind,
+                        id: kind === "direct" ? senderId : channelId,
+                    },
+                });
+                console.log(route);
+                console.log(4444);
+                const baseSessionKey = route.sessionKey;
+                const threadRootId = normalizeOptionalString(post.root_id);
+                const replyToMode = resolveChantyReplyToMode(account, kind);
+                const threadContext = resolveChantyThreadSessionContext({
+                    baseSessionKey,
+                    kind,
+                    postId: post.id,
+                    replyToMode,
+                    threadRootId,
+                });
+                const { effectiveReplyToId, sessionKey, parentSessionKey } = threadContext;
+                const historyKey = kind === "direct" ? null : sessionKey;
+                const mentionRegexes = core.channel.mentions.buildMentionRegexes(cfg, route.agentId);
+                const wasMentioned = kind !== "direct" &&
+                    ((botUsername
+                        ? normalizeLowercaseStringOrEmpty(rawText).includes(`@${normalizeLowercaseStringOrEmpty(botUsername)}`)
+                        : false) ||
+                        core.channel.mentions.matchesMentionPatterns(rawText, mentionRegexes));
+                const pendingBody = rawText ||
+                    (post.file_ids?.length
+                        ? `[Chanty ${post.file_ids.length === 1 ? "file" : "files"}]`
+                        : "");
+                const pendingSender = senderName;
+                const recordPendingHistory = () => {
+                    const trimmed = pendingBody.trim();
+                    createChannelHistoryWindow({ historyMap: channelHistories }).record({
+                        limit: historyLimit,
+                        historyKey: historyKey ?? "",
+                        entry: historyKey && trimmed
+                            ? {
+                                sender: pendingSender,
+                                body: trimmed,
+                                timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
+                                messageId: post.id ?? undefined,
+                            }
+                            : null,
+                    });
+                };
+                const oncharEnabled = account.chatmode === "onchar" && kind !== "direct";
+                const oncharPrefixes = oncharEnabled ? resolveOncharPrefixes(account.oncharPrefixes) : [];
+                const oncharResult = oncharEnabled
+                    ? stripOncharPrefix(rawText, oncharPrefixes)
+                    : { triggered: false, stripped: rawText };
+                const oncharTriggered = oncharResult.triggered;
+                const canDetectMention = Boolean(botUsername) || mentionRegexes.length > 0;
+                // Threads the bot already replied in auto-engage: follow-ups resume without
+                // a re-mention even under requireMention. Keyed by the thread root id.
+                const threadAlreadyEngaged = kind !== "direct" && effectiveReplyToId
+                    ? await hasChantyThreadParticipationWithPersistence({
+                        accountId: account.accountId,
+                        channelId,
+                        threadRootId: effectiveReplyToId,
+                    })
+                    : false;
+                /* const mentionDecision = evaluateChantyMentionGate({
+                  kind,
+                  cfg,
+                  accountId: account.accountId,
+                  channelId,
+                  threadRootId,
+                  requireMentionOverride: account.requireMention,
+                  resolveRequireMention: core.channel.groups.resolveRequireMention,
+                  wasMentioned,
+                  threadAlreadyEngaged,
+                  isControlCommand,
+                  commandAuthorized,
+                  oncharEnabled,
+                  oncharTriggered,
+                  canDetectMention,
+                });
+                const { shouldRequireMention, shouldBypassMention } = mentionDecision;
+        
+                if (mentionDecision.dropReason === "onchar-not-triggered") {
+                  logVerboseMessage(
+                    `chanty: drop group message (onchar not triggered channel=${channelId} sender=${senderId})`,
+                  );
+                  recordPendingHistory();
+                  return;
+                }
+        
+                if (mentionDecision.dropReason === "missing-mention") {
+                  logVerboseMessage(
+                    `chanty: drop group message (missing mention channel=${channelId} sender=${senderId} requireMention=${shouldRequireMention} bypass=${shouldBypassMention} canDetectMention=${canDetectMention})`,
+                  );
+                  recordPendingHistory();
+                  return;
+                } */
+                console.log(555);
+                const fileIds = uniqueStrings(normalizeTrimmedStringList(post.file_ids ?? []));
+                const mediaList = await resolveChantyMedia(fileIds);
+                const mediaPlaceholder = buildChantyAttachmentPlaceholder(mediaList);
+                const bodySource = oncharTriggered ? oncharResult.stripped : rawText;
+                const downloadedText = [bodySource, mediaPlaceholder].filter(Boolean).join("\n").trim();
+                const baseText = formatChantyInboundMediaText({
+                    body: downloadedText,
+                    mediaPlaceholder,
+                    expectedCount: fileIds.length,
+                    mediaCount: mediaList.length,
+                });
+                const bodyText = normalizeMention(baseText, botUsername);
+                console.log(666, bodyText);
+                if (shouldDropEmptyChantyBody({ bodyText, rawText: rawPostText, botUsername })) {
+                    logVerboseMessage(`chanty: drop message (empty body after normalization channel=${channelId} sender=${senderId} wasMentioned=${wasMentioned})`);
+                    return;
+                }
+                console.log(777);
+                // Mention-only turns need non-empty agent text; the shared reply runner rejects empty
+                // bodies before model invocation. The guard above ensures this fallback is a bot mention.
+                const bodyForAgent = bodyText || rawText.trim();
+                core.channel.activity.record({
+                    channel: "chanty",
+                    accountId: account.accountId,
+                    direction: "inbound",
+                });
+                const fromLabel = formatInboundFromLabel({
+                    isGroup: kind !== "direct",
+                    groupLabel: channelDisplay || roomLabel,
+                    groupId: channelId,
+                    groupFallback: roomLabel || "Channel",
+                    directLabel: senderName,
+                    directId: senderId,
+                });
+                const textWithId = `${bodyText}\n[chanty message id: ${post.id ?? "unknown"} channel: ${channelId}]`;
+                const body = core.channel.reply.formatInboundEnvelope({
+                    channel: "Chanty",
+                    from: fromLabel,
+                    timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
+                    body: textWithId,
+                    chatType,
+                    sender: { name: senderName, id: senderId },
+                });
+                let combinedBody = body;
+                if (historyKey) {
+                    const channelHistory = createChannelHistoryWindow({ historyMap: channelHistories });
+                    combinedBody = channelHistory.buildPendingContext({
+                        historyKey,
+                        limit: historyLimit,
+                        currentMessage: combinedBody,
+                        formatEntry: (entry) => core.channel.reply.formatInboundEnvelope({
+                            channel: "Chanty",
+                            from: fromLabel,
+                            timestamp: entry.timestamp,
+                            body: `${entry.body}${entry.messageId ? ` [id:${entry.messageId} channel:${channelId}]` : ""}`,
+                            chatType,
+                            senderLabel: entry.sender,
+                        }),
+                    });
+                }
+                const to = kind === "direct" ? `user:${senderId}` : `channel:${channelId}`;
+                const mediaPayload = buildAgentMediaPayload(mediaList);
+                const commandBody = rawText.trim();
+                const inboundHistory = historyKey && historyLimit > 0
+                    ? createChannelHistoryWindow({ historyMap: channelHistories }).buildInboundHistory({
+                        historyKey,
+                        limit: historyLimit,
+                    })
+                    : undefined;
+                const ctxPayload = core.channel.reply.finalizeInboundContext({
+                    Body: combinedBody,
+                    BodyForAgent: bodyForAgent,
+                    InboundHistory: inboundHistory,
+                    RawBody: commandBody,
+                    CommandBody: commandBody,
+                    BodyForCommands: commandBody,
+                    From: kind === "direct"
+                        ? `chanty:${senderId}`
+                        : kind === "group"
+                            ? `chanty:group:${channelId}`
+                            : `chanty:channel:${channelId}`,
+                    To: to,
+                    SessionKey: sessionKey,
+                    ParentSessionKey: parentSessionKey,
+                    AccountId: route.accountId,
+                    ChatType: chatType,
+                    ConversationLabel: fromLabel,
+                    GroupSubject: kind !== "direct" ? channelDisplay || roomLabel : undefined,
+                    GroupChannel: channelName ? `#${channelName}` : undefined,
+                    GroupSpace: teamId,
+                    SenderName: senderName,
+                    SenderId: senderId,
+                    Provider: "chanty",
+                    Surface: "chanty",
+                    MessageSid: post.id ?? undefined,
+                    MessageSids: allMessageIds.length > 1 ? allMessageIds : undefined,
+                    MessageSidFirst: allMessageIds.length > 1 ? allMessageIds[0] : undefined,
+                    MessageSidLast: allMessageIds.length > 1 ? allMessageIds[allMessageIds.length - 1] : undefined,
+                    ReplyToId: effectiveReplyToId,
+                    MessageThreadId: effectiveReplyToId,
+                    Timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
+                    WasMentioned: undefined, // kind !== "direct" ? mentionDecision.effectiveWasMentioned : undefined,
+                    CommandAuthorized: commandAuthorized,
+                    // Tag typed text-slash control commands (e.g. ` /new`, ` /reset` sent via the regular
+                    // post path rather than Chanty's native slash UI) so the explicit-command turn
+                    // exception in source-reply-delivery-mode.ts surfaces their acknowledgements under
+                    // message_tool_only delivery modes (e.g. Codex harness DMs). Mirrors iMessage #82642.
+                    CommandSource: commandAuthorized && isControlCommand ? "text" : undefined,
+                    OriginatingChannel: "chanty",
+                    OriginatingTo: to,
+                    ...mediaPayload,
+                });
+                const pinnedMainDmOwner = kind === "direct"
+                    ? resolvePinnedMainDmOwnerFromAllowlist({
+                        dmScope: cfg.session?.dmScope,
+                        allowFrom: account.config.allowFrom,
+                        normalizeEntry: normalizeChantyAllowEntry,
+                    })
+                    : null;
+                const storePath = core.channel.session.resolveStorePath(cfg.session?.store, {
+                    agentId: route.agentId,
+                });
+                const previewLine = bodyText.slice(0, 200).replace(/\n/g, "\\n");
+                logVerboseMessage(`chanty inbound: from=${ctxPayload.From} len=${bodyText.length} preview="${previewLine}"`);
+                const textLimit = core.channel.text.resolveTextChunkLimit(cfg, "chanty", account.accountId, {
+                    fallbackLimit: account.textChunkLimit ?? 4000,
+                });
+                const tableMode = core.channel.text.resolveMarkdownTableMode({
+                    cfg,
+                    channel: "chanty",
+                    accountId: account.accountId,
+                });
+                // @note sendTypingIndicator
+                const { onModelSelected, typingCallbacks, ...replyPipeline } = createChannelMessageReplyPipeline({
+                    cfg,
+                    agentId: route.agentId,
+                    channel: "chanty",
+                    accountId: account.accountId,
+                    typing: {
+                        keepaliveIntervalMs: 5_000,
+                        start: () => sendTypingIndicator(channelId, effectiveReplyToId),
+                        onStartError: (err) => {
+                            logTypingFailure({
+                                log: (message) => logger.debug?.(message),
+                                channel: "chanty",
+                                target: channelId,
+                                error: err,
+                            });
+                        },
+                    },
+                });
+                const draftPreviewEnabled = false; // account.streamingMode !== "off";
+                const draftToolProgressEnabled = shouldUpdateChantyDraftToolProgress(account);
+                const suppressDefaultToolProgressMessages = shouldSuppressChantyDefaultToolProgressMessages(account);
+                const draftStream = draftPreviewEnabled
+                    ? createChantyDraftStream({
+                        client,
+                        channelId,
+                        rootId: effectiveReplyToId,
+                        throttleMs: 1200,
+                        log: logVerboseMessage,
+                        warn: logVerboseMessage,
+                    })
+                    : createDisabledChantyDraftStream();
+                let lastPartialText = "";
+                const progressDraft = createChannelProgressDraftCompositor({
+                    entry: account.config,
+                    mode: account.streamingMode,
+                    active: draftPreviewEnabled,
+                    seed: `${account.accountId}:${channelId}`,
+                    update: async (previewText, options) => {
+                        draftStream.update(previewText);
+                        if (options?.flush) {
+                            await draftStream.flush();
+                        }
+                    },
+                });
+                const previewState = {
+                    finalizedViaPreviewPost: false,
+                };
+                const resolvePreviewFinalText = (text) => {
+                    if (typeof text !== "string") {
+                        return undefined;
+                    }
+                    const formatted = core.channel.text.convertMarkdownTables(text, tableMode);
+                    const chunkMode = core.channel.text.resolveChunkMode(cfg, "chanty", account.accountId);
+                    const chunks = core.channel.text.chunkMarkdownTextWithMode(formatted, textLimit, chunkMode);
+                    if (!chunks.length && formatted) {
+                        chunks.push(formatted);
+                    }
+                    if (chunks.length != 1) {
+                        return undefined;
+                    }
+                    const trimmed = chunks[0]?.trim();
+                    if (!trimmed) {
+                        return undefined;
+                    }
+                    if (lastPartialText &&
+                        lastPartialText.startsWith(trimmed) &&
+                        trimmed.length < lastPartialText.length) {
+                        return undefined;
+                    }
+                    return trimmed;
+                };
+                const updateDraftFromPartial = (text) => {
+                    const cleaned = text?.trim();
+                    if (!cleaned) {
+                        return;
+                    }
+                    if (cleaned === lastPartialText) {
+                        return;
+                    }
+                    if (lastPartialText &&
+                        lastPartialText.startsWith(cleaned) &&
+                        cleaned.length < lastPartialText.length) {
+                        return;
+                    }
+                    lastPartialText = cleaned;
+                    draftStream.update(cleaned);
+                };
+                const deliveryBarrier = createChantyReplyDeliveryBarrier({
+                    isDirect: kind === "direct",
+                    dmRetryOptions: account.config.dmChannelRetry,
+                });
+                const { dispatcher, replyOptions, markDispatchIdle, markRunComplete } = core.channel.reply.createReplyDispatcherWithTyping({
+                    ...replyPipeline,
+                    resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
+                    onDeliverySettled: deliveryBarrier.markDeliverySettled,
+                    humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
+                    typingCallbacks,
+                    deliver: async (payloadEntry, info) => {
+                        if (info.kind === "final") {
+                            progressDraft.markFinalReplyStarted();
+                        }
+                        // A visible same-thread final arrives either via a normal send or by editing
+                        // the draft preview in place; record participation on whichever path fires.
+                        const markThreadParticipation = () => {
+                            if (kind !== "direct" && effectiveReplyToId) {
+                                recordChantyThreadParticipation(account.accountId, channelId, effectiveReplyToId, { agentId: route.agentId });
+                            }
+                        };
+                        await deliverChantyReplyWithDraftPreview({
+                            payload: payloadEntry,
+                            info,
+                            kind,
+                            client,
+                            draftStream,
+                            effectiveReplyToId,
+                            resolvePreviewFinalText,
+                            previewState,
+                            logVerboseMessage,
+                            recordThreadParticipation: markThreadParticipation,
+                            deliverPayload: async (payloadToDeliver) => {
+                                const outcome = await deliverChantyReplyPayload({
+                                    core,
+                                    cfg,
+                                    payload: payloadToDeliver,
+                                    to,
+                                    accountId: account.accountId,
+                                    agentId: route.agentId,
+                                    replyToId: resolveChantyReplyRootId({
+                                        kind,
+                                        threadRootId: effectiveReplyToId,
+                                        replyToId: payloadToDeliver.replyToId,
+                                    }),
+                                    textLimit,
+                                    tableMode,
+                                    sendMessage: sendMessageChanty,
+                                    onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
+                                });
+                                // Record only on a visible send so threads we merely observed
+                                // (reasoning-only/empty/suppressed) do not auto-engage later.
+                                if (outcome === "text" || outcome === "media") {
+                                    markThreadParticipation();
+                                }
+                                const deliveryLog = formatChantyFinalDeliveryOutcomeLog({
+                                    outcome,
+                                    payload: payloadToDeliver,
+                                    to,
+                                    accountId: account.accountId,
+                                    agentId: route.agentId,
+                                });
+                                if (deliveryLog) {
+                                    runtime.log?.(deliveryLog);
+                                }
+                            },
+                        });
+                        if (info.kind === "final") {
+                            progressDraft.markFinalReplyDelivered();
+                        }
+                    },
+                    onError: (err, info) => {
+                        runtime.error?.(`chanty ${info.kind} reply failed: ${String(err)}`);
+                    },
+                });
+                const inboundLastRouteSessionKey = resolveInboundLastRouteSessionKey({
+                    route,
+                    sessionKey: route.sessionKey,
+                });
+                let dispatchSettledBeforeStart = false;
+                try {
+                    await core.channel.inbound.run({
+                        channel: "chanty",
+                        accountId: route.accountId,
+                        raw: post,
+                        adapter: {
+                            ingest: () => ({
+                                id: post.id ?? `${to}:${Date.now()}`,
+                                timestamp: post.create_at ?? undefined,
+                                rawText,
+                                textForAgent: ctxPayload.BodyForAgent,
+                                textForCommands: ctxPayload.CommandBody,
+                                raw: post,
+                            }),
+                            resolveTurn: () => ({
+                                channel: "chanty",
+                                accountId: route.accountId,
+                                routeSessionKey: route.sessionKey,
+                                storePath,
+                                ctxPayload,
+                                recordInboundSession: core.channel.session.recordInboundSession,
+                                record: {
+                                    updateLastRoute: kind === "direct"
+                                        ? {
+                                            sessionKey: inboundLastRouteSessionKey,
+                                            channel: "chanty",
+                                            to,
+                                            accountId: route.accountId,
+                                            mainDmOwnerPin: inboundLastRouteSessionKey === route.mainSessionKey && pinnedMainDmOwner
+                                                ? {
+                                                    ownerRecipient: pinnedMainDmOwner,
+                                                    senderRecipient: normalizeChantyAllowEntry(senderId),
+                                                    onSkip: ({ ownerRecipient, senderRecipient, }) => {
+                                                        logVerboseMessage(`chanty: skip main-session last route for ${senderRecipient} (pinned owner ${ownerRecipient})`);
+                                                    },
+                                                }
+                                                : undefined,
+                                        }
+                                        : undefined,
+                                    onRecordError: (err) => {
+                                        logVerboseMessage(`chanty: failed updating session meta id=${post.id ?? "unknown"}: ${String(err)}`);
+                                    },
+                                },
+                                history: {
+                                    isGroup: Boolean(historyKey),
+                                    historyKey: historyKey ?? undefined,
+                                    historyMap: channelHistories,
+                                    limit: historyLimit,
+                                },
+                                onPreDispatchFailure: async () => {
+                                    dispatchSettledBeforeStart = true;
+                                    await core.channel.reply.settleReplyDispatcher({
+                                        dispatcher,
+                                        onSettled: () => {
+                                            markRunComplete();
+                                            markDispatchIdle();
+                                        },
+                                    });
+                                },
+                                runDispatch: () => core.channel.reply.withReplyDispatcher({
+                                    dispatcher,
+                                    onSettled: () => {
+                                        markDispatchIdle();
+                                    },
+                                    run: () => core.channel.reply.dispatchReplyFromConfig({
+                                        ctx: ctxPayload,
+                                        cfg,
+                                        dispatcher,
+                                        replyOptions: {
+                                            ...replyOptions,
+                                            allowProgressCallbacksWhenSourceDeliverySuppressed: draftToolProgressEnabled ? true : undefined,
+                                            onObservedReplyDelivery: draftToolProgressEnabled
+                                                ? () => draftStream.clear()
+                                                : undefined,
+                                            disableBlockStreaming: true,
+                                            ...(suppressDefaultToolProgressMessages
+                                                ? { suppressDefaultToolProgressMessages: true }
+                                                : {}),
+                                            onModelSelected,
+                                            onPartialReply: (payloadResult) => {
+                                                if (account.streamingMode !== "progress") {
+                                                    updateDraftFromPartial(payloadResult.text);
+                                                }
+                                            },
+                                            onAssistantMessageStart: () => {
+                                                lastPartialText = "";
+                                                progressDraft.resetReasoningProgress();
+                                                if (account.streamingMode !== "progress") {
+                                                    progressDraft.reset();
+                                                }
+                                            },
+                                            onReasoningEnd: () => {
+                                                lastPartialText = "";
+                                                progressDraft.resetReasoningProgress();
+                                                if (account.streamingMode !== "progress") {
+                                                    progressDraft.reset();
+                                                }
+                                            },
+                                            onReasoningStream: async (payloadResult) => {
+                                                if (account.streamingMode === "progress") {
+                                                    await progressDraft.pushReasoningProgress(payloadResult.text || "Thinking…", { snapshot: payloadResult.isReasoningSnapshot === true });
+                                                    return;
+                                                }
+                                                if (!lastPartialText) {
+                                                    draftStream.update("Thinking…");
+                                                }
+                                            },
+                                            onToolStart: async (payloadValue) => {
+                                                if (!draftToolProgressEnabled) {
+                                                    return;
+                                                }
+                                                await progressDraft.pushToolProgress(buildChannelProgressDraftLineForEntry(account.config, {
+                                                    event: "tool",
+                                                    itemId: payloadValue.itemId,
+                                                    toolCallId: payloadValue.toolCallId,
+                                                    name: payloadValue.name,
+                                                    phase: payloadValue.phase,
+                                                    args: payloadValue.args,
+                                                }, payloadValue.detailMode
+                                                    ? { detailMode: payloadValue.detailMode }
+                                                    : undefined), { startImmediately: true });
+                                            },
+                                            onItemEvent: async (payloadLocal) => {
+                                                if (!draftToolProgressEnabled) {
+                                                    return;
+                                                }
+                                                await progressDraft.pushToolProgress(buildChannelProgressDraftLineForEntry(account.config, {
+                                                    event: "item",
+                                                    itemId: payloadLocal.itemId,
+                                                    itemKind: payloadLocal.kind,
+                                                    title: payloadLocal.title,
+                                                    name: payloadLocal.name,
+                                                    phase: payloadLocal.phase,
+                                                    status: payloadLocal.status,
+                                                    summary: payloadLocal.summary,
+                                                    progressText: payloadLocal.progressText,
+                                                    meta: payloadLocal.meta,
+                                                }), { startImmediately: true });
+                                            },
+                                        },
+                                    }),
+                                }),
+                            }),
+                        },
+                    });
+                }
+                finally {
+                    try {
+                        await draftStream.stop();
+                    }
+                    catch (err) {
+                        logVerboseMessage(`chanty draft preview cleanup failed: ${String(err)}`);
+                    }
+                    if (!dispatchSettledBeforeStart) {
+                        markRunComplete();
+                    }
+                }
+            },
+        });
+        console.log(333, 'replayResult', replayResult);
+        if (replayResult === "duplicate") {
+            logVerboseMessage(`chanty: drop post (dedupe account=${account.accountId} ids=${allMessageIds.length})`);
+        }
+    };
+    const handleReactionEvent = async (payload) => {
+        const reactionData = payload.data?.reaction;
+        if (!reactionData) {
+            return;
+        }
+        let reaction = null;
+        if (typeof reactionData === "string") {
+            try {
+                reaction = JSON.parse(reactionData);
+            }
+            catch {
+                return;
+            }
+        }
+        else if (typeof reactionData === "object") {
+            reaction = reactionData;
+        }
+        if (!reaction) {
+            return;
+        }
+        const userId = reaction.user_id?.trim();
+        const postId = reaction.post_id?.trim();
+        const emojiName = reaction.emoji_name?.trim();
+        if (!userId || !postId || !emojiName) {
+            return;
+        }
+        // Skip reactions from the bot itself
+        if (userId === botUserId) {
+            return;
+        }
+        const isRemoved = payload.event === "reaction_removed";
+        const action = isRemoved ? "removed" : "added";
+        const senderInfo = await resolveUserInfo(userId);
+        const senderName = normalizeOptionalString(senderInfo?.username) ?? userId;
+        // Resolve the channel from broadcast or post to route to the correct agent session
+        const channelId = resolveChantyReactionChannelId(payload);
+        if (!channelId) {
+            // Without a channel id we cannot verify DM/group policies — drop to be safe
+            logVerboseMessage(`chanty: drop reaction (no channel_id in broadcast, cannot enforce policy)`);
+            return;
+        }
+        const channelInfo = await resolveChannelInfo(channelId);
+        if (!channelInfo?.type) {
+            // Cannot determine channel type — drop to avoid policy bypass
+            logVerboseMessage(`chanty: drop reaction (cannot resolve channel type for ${channelId})`);
+            return;
+        }
+        const kind = mapChantyChannelTypeToChatType(channelInfo.type);
+        // Enforce DM/group policy and allowlist checks (same as normal messages).
+        const reactionAccess = await resolveChantyMonitorInboundAccess({
+            account,
+            cfg,
+            senderId: userId,
+            senderName,
+            channelId,
+            kind,
+            groupPolicy,
+            readStoreAllowFrom: pairing.readAllowFromStore,
+            allowTextCommands: false,
+            hasControlCommand: false,
+            eventKind: "reaction",
+            mayPair: false,
+        });
+        if (reactionAccess.ingress.decision !== "allow") {
+            if (kind === "direct") {
+                logVerboseMessage(`chanty: drop reaction (dmPolicy=${dmPolicy} sender=${userId} reason=${reactionAccess.senderAccess.reasonCode})`);
+            }
+            else {
+                logVerboseMessage(`chanty: drop reaction (groupPolicy=${groupPolicy} sender=${userId} reason=${reactionAccess.senderAccess.reasonCode} channel=${channelId})`);
+            }
+            return;
+        }
+        const teamId = channelInfo?.team_id ?? undefined;
+        const route = core.channel.routing.resolveAgentRoute({
+            cfg,
+            channel: "chanty",
+            accountId: account.accountId,
+            teamId,
+            peer: {
+                kind,
+                id: kind === "direct" ? userId : channelId,
+            },
+        });
+        const sessionKey = route.sessionKey;
+        const eventText = `Chanty reaction ${action}: :${emojiName}: by @${senderName} on post ${postId} in channel ${channelId}`;
+        core.system.enqueueSystemEvent(eventText, {
+            sessionKey,
+            contextKey: `chanty:reaction:${postId}:${emojiName}:${userId}:${action}`,
+        });
+        logVerboseMessage(`chanty reaction: ${action} :${emojiName}: by ${senderName} on ${postId}`);
+    };
+    const inboundDebounceMs = core.channel.debounce.resolveInboundDebounceMs({
+        cfg,
+        channel: "chanty",
+    });
+    const debouncer = core.channel.debounce.createInboundDebouncer({
+        debounceMs: inboundDebounceMs,
+        buildKey: (entry) => {
+            /* const channelId =
+              entry.post.channel_id ??
+              entry.payload.data?.channel_id ??
+              entry.payload.broadcast?.channel_id;
+            if (!channelId) {
+              return null;
+            }
+            const threadId = normalizeOptionalString(entry.post.root_id);
+            const threadKey = threadId ? `thread:${threadId}` : "channel"; */
+            // return `chanty:${account.accountId}:${entry.payload.uri}:${threadKey}`;
+            return `chanty:${account.accountId}:${entry.payload.uri}`;
+            //return entry.payload.uri
+        },
+        shouldDebounce: (entry) => {
+            /* if (entry.post.file_ids && entry.post.file_ids.length > 0) {
+              return false;
+            }
+            const text = normalizeOptionalString(entry.post.message) ?? "";
+            if (!text) {
+              return false;
+            }
+            return !core.channel.commands.isControlCommandMessage(text, cfg); */
+            console.log('shouldDebounce', entry);
+            return true;
+        },
+        onFlush: async (entries) => {
+            const last = entries.at(-1);
+            console.log('onFlush', entries);
+            if (!last) {
+                return;
+            }
+            entries.forEach(async () => {
+                await handlePost(/* last.post, */ last.payload);
+            });
+            return;
+            // @todo merge posts
+            /* if (entries.length === 1) {
+              await handlePost(last.post, last.payload);
+              return;
+            }
+            const combinedText = entries
+              .map((entry) => normalizeOptionalString(entry.payload.text) ?? "")
+              .filter(Boolean)
+              .join("\n");
+            const mergedPost: ChantyPost = {
+              ...last.payload,
+              message: combinedText,
+              file_ids: [],
+            };
+            const ids = entries.map((entry) => entry.payload.uri).filter(Boolean);
+            await handlePost(mergedPost, last.payload, ids.length > 0 ? ids : undefined); */
+        },
+        onError: (err) => {
+            runtime.error?.(`chanty debounce flush failed: ${String(err)}`);
+        },
+    });
+    const wsUrl = buildChantyWsUrl(botUser, botToken);
+    console.log(botUser, wsUrl);
+    let seq = 1;
+    const connectOnce = createChantyConnectOnce({
+        wsUrl,
+        client,
+        //botToken,
+        abortSignal: opts.abortSignal,
+        statusSink: opts.statusSink,
+        runtime,
+        webSocketFactory: opts.webSocketFactory,
+        nextSeq: () => seq++,
+        /* getBotUpdateAt: async () => {
+          const me = await fetchChantyMe(client);
+          return me.update_at ?? 0;
+        }, */
+        onPosted: async (payload) => {
+            await debouncer.enqueue({ payload });
+        },
+        onReaction: async (payload) => {
+            await handleReactionEvent(payload);
+        },
+    });
+    /* let slashShutdownCleanup: Promise<void> | null = null;
+  
+    // Clean up slash commands on shutdown
+    if (slashEnabled) {
+      const runAbortCleanup = () => {
+        if (slashShutdownCleanup) {
+          return;
+        }
+        // Snapshot registered commands before deactivating state.
+        // This listener may run concurrently with startup in a new process, so we keep
+        // monitor shutdown alive until the remote cleanup completes.
+        const commands = getSlashCommandState(account.accountId)?.registeredCommands ?? [];
+        // Deactivate state immediately to prevent new local dispatches during teardown.
+        deactivateSlashCommands(account.accountId);
+  
+        slashShutdownCleanup = cleanupSlashCommands({
+          client,
+          commands,
+          log: (msg) => runtime.log?.(msg),
+        }).catch((err: unknown) => {
+          runtime.error?.(`chanty: slash cleanup failed: ${String(err)}`);
+        });
+      };
+  
+      if (opts.abortSignal?.aborted) {
+        runAbortCleanup();
+      } else {
+        opts.abortSignal?.addEventListener("abort", runAbortCleanup, { once: true });
+      }
+    } */
+    try {
+        await runWithReconnect(connectOnce, {
+            abortSignal: opts.abortSignal,
+            jitterRatio: 0.2,
+            onError: (err) => {
+                runtime.error?.(`chanty connection failed: ${String(err)}`);
+                opts.statusSink?.({ lastError: String(err), connected: false });
+            },
+            onReconnect: (delayMs) => {
+                console.log(botUser, wsUrl);
+                runtime.log?.(`chanty reconnecting in ${Math.round(delayMs / 1000)}s`);
+            },
+        });
+    }
+    finally {
+        // unregisterInteractions?.();
+    }
+    /* const slashShutdownCleanupPromise = slashShutdownCleanup;
+    if (slashShutdownCleanupPromise) {
+      await Promise.resolve(slashShutdownCleanupPromise);
+    } */
+}

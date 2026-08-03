@@ -1,0 +1,47 @@
+{
+  "name": "@chanty/openclaw",
+  "version": "0.0.1-beta",
+  "description": "OpenClaw Chanty channel plugin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openclaw/openclaw"
+  },
+  "type": "module",
+  "files": [
+    "dist/",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "main": "dist/index.js",
+  "dependencies": {
+    "clawhub": "^0.23.1",
+    "ws": "8.21.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "openclaw": "^2026.4.15",
+    "typescript": "^5.7.2"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.15"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "channel": {
+      "id": "chanty",
+      "label": "Chanty",
+      "blurb": "Connect OpenClaw to Chanty."
+    },
+    "compat": {
+      "pluginApi": ">=2026.7.1",
+      "minGatewayVersion": "2026.7.1"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1",
+      "pluginSdkVersion": "2026.7.1"
+    }
+  }
+}

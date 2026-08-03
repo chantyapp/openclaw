@@ -1,0 +1,26 @@
+{
+  "id": "chanty",
+  "icon": "https://cdn.chanty.com/favicon.png",
+  "activation": {
+    "onStartup": false
+  },
+  "channels": ["chanty"],
+  "channelEnvVars": {
+    "chanty": []
+  },
+  "channelConfigs": {
+    "chanty": {
+      "label": "Chanty",
+      "description": "Chanty conversations integration.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
