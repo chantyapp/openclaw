@@ -1,4 +1,3 @@
-// Chanty plugin module implements setup core behavior.
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import { applyAccountNameToChannelSection, applySetupAccountConfigPatch, migrateBaseNameToDefaultAccount, } from "openclaw/plugin-sdk/setup";
 import { createSetupInputPresenceValidator } from "openclaw/plugin-sdk/setup-runtime";

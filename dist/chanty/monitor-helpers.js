@@ -1,4 +1,3 @@
-// Chanty helper module supports monitor helpers behavior.
 import { formatInboundFromLabel as formatInboundFromLabelShared } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveThreadSessionKeys as resolveThreadSessionKeysShared } from "openclaw/plugin-sdk/routing";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -11,10 +10,6 @@ export function resolveThreadSessionKeys(params) {
         normalizeThreadId: (threadId) => threadId,
     });
 }
-/**
- * Strip bot mention from message text while preserving newlines and
- * block-level Markdown formatting (headings, lists, blockquotes).
- */
 export function normalizeMention(text, mention) {
     if (!mention) {
         return text.trim();

@@ -1,4 +1,3 @@
-// Chanty plugin module implements monitor auth behavior.
 import { parseAccessGroupAllowFromEntry } from "openclaw/plugin-sdk/access-groups";
 import { resolveStableChannelMessageIngress, } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { normalizeLowercaseStringOrEmpty, uniqueStrings, } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -75,10 +74,10 @@ function mapChantyChannelKind(channelType) {
 }
 export async function resolveChantyMonitorInboundAccess(params) {
     const { account, cfg, senderId, senderName, channelId, kind, groupPolicy, storeAllowFrom, allowTextCommands, hasControlCommand, } = params;
-    const dmPolicy = "open"; //account.config.dmPolicy ?? "pairing";
+    const dmPolicy = "open";
     const allowNameMatching = isDangerousNameMatchingEnabled(account.config);
-    const configAllowFrom = ['*']; //account.config.allowFrom ?? [];
-    const configGroupAllowFrom = ['*']; //account.config.groupAllowFrom ?? [];
+    const configAllowFrom = ['*'];
+    const configGroupAllowFrom = ['*'];
     const readStoreAllowFrom = params.readStoreAllowFrom ??
         (storeAllowFrom != null ? async () => [...storeAllowFrom] : undefined);
     const ingress = await resolveStableChannelMessageIngress({

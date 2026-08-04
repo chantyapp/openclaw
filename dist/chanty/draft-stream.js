@@ -1,4 +1,3 @@
-// Chanty plugin module implements draft stream behavior.
 import { createFinalizableDraftLifecycle } from "openclaw/plugin-sdk/channel-outbound";
 import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { createChantyPost, deleteChantyPost, updateChantyPost, } from "./client.js";

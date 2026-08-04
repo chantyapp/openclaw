@@ -1,4 +1,3 @@
-// Chanty plugin module implements model picker behavior.
 import { createHash } from "node:crypto";
 import { resolveStoredModelOverride, } from "openclaw/plugin-sdk/command-auth-native";
 import { parseStrictInteger } from "openclaw/plugin-sdk/number-runtime";
@@ -20,7 +19,6 @@ function splitModelRef(modelRef) {
         return null;
     }
     const provider = normalizeProviderId(match[1]);
-    // Chanty copy should normalize accidental whitespace around the model.
     const model = normalizeOptionalString(match[2]);
     if (!provider || !model) {
         return null;
@@ -91,7 +89,6 @@ function buildButton(params) {
                 model: normalizeStringifiedOptionalString(params.model) ?? "",
             };
     return {
-        // Chanty requires action IDs to be unique within a post.
         id: buildButtonId(baseState),
         text: params.text,
         ...(params.style ? { style: params.style } : {}),

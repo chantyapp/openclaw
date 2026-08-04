@@ -1,4 +1,3 @@
-// Chanty helper module supports normalize behavior.
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 export function normalizeChantyMessagingTarget(raw) {
     const trimmed = raw.trim();
@@ -27,12 +26,8 @@ export function normalizeChantyMessagingTarget(raw) {
         return id ? `@${id}` : undefined;
     }
     if (trimmed.startsWith("#")) {
-        // Strip # prefix and fall through to directory lookup (same as bare names).
-        // The core's resolveMessagingTarget will use the directory adapter to
-        // resolve the channel name to its Chanty ID.
         return undefined;
     }
-    // Bare name without prefix — return undefined to allow directory lookup
     return undefined;
 }
 export function looksLikeChantyTargetId(raw, _normalized) {
@@ -46,6 +41,5 @@ export function looksLikeChantyTargetId(raw, _normalized) {
     if (trimmed.startsWith("@")) {
         return true;
     }
-    // Chanty IDs: 26-char alnum, or DM channels like "abc123__xyz789" (53 chars)
     return /^[a-z0-9]{26}$/i.test(trimmed) || /^[a-z0-9]{26}__[a-z0-9]{26}$/i.test(trimmed);
 }

@@ -1,4 +1,3 @@
-// Chanty plugin module implements directory behavior.
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { listChantyAccountIds, resolveChantyAccount } from "./accounts.js";
@@ -14,15 +13,6 @@ function buildClient(params) {
         allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
     });
 }
-/**
- * Build clients from ALL enabled accounts (deduplicated by token).
- *
- * We always scan every account because:
- * - Private channels are only visible to bots that are members
- * - The requesting agent's account may have an expired/invalid token
- *
- * This means a single healthy bot token is enough for directory discovery.
- */
 function buildClients(params) {
     const accountIds = listChantyAccountIds(params.cfg);
     const seen = new Set();
@@ -36,13 +26,6 @@ function buildClients(params) {
     }
     return clients;
 }
-/**
- * List channels (public + private) visible to any configured bot account.
- *
- * NOTE: Uses per_page=200 which covers most instances. Chanty does not
- * return a "has more" indicator, so very large instances (200+ channels per bot)
- * may see incomplete results. Pagination can be added if needed.
- */
 export async function listChantyDirectoryGroups(params) {
     const clients = buildClients(params);
     if (!clients.length) {
@@ -79,29 +62,17 @@ export async function listChantyDirectoryGroups(params) {
             }
         }
         catch (err) {
-            // Token may be expired/revoked — skip this account and try others
             console.debug?.("[chanty-directory] listGroups: skipping account:", err?.message);
             continue;
         }
     }
     return params.limit && params.limit > 0 ? entries.slice(0, params.limit) : entries;
 }
-/**
- * List team members as peer directory entries.
- *
- * Uses only the first available client since all bots in a team see the same
- * user list (unlike channels where membership varies). Uses the first team
- * returned — multi-team setups will only see members from that team.
- *
- * Uses paginated member listing with per_page=200, the Chanty API maximum.
- */
 export async function listChantyDirectoryPeers(params) {
     const clients = buildClients(params);
     if (!clients.length) {
         return [];
     }
-    // All bots see the same user list, so one client suffices (unlike channels
-    // where private channel membership varies per bot).
     const client = clients[0];
     try {
         const me = await fetchChantyMe(client);
@@ -109,7 +80,6 @@ export async function listChantyDirectoryPeers(params) {
         if (!teams.length) {
             return [];
         }
-        // Uses first team — multi-team setups may need iteration in the future
         const teamId = teams[0].id;
         const q = normalizeLowercaseStringOrEmpty(params.query);
         let users;

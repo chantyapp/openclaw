@@ -1,4 +1,3 @@
-// Chanty plugin module implements approval auth behavior.
 import { createResolvedApproverActionAuthAdapter, resolveApprovalApprovers, } from "openclaw/plugin-sdk/approval-auth-runtime";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveChantyAccount } from "./chanty/accounts.js";

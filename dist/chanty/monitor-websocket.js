@@ -1,24 +1,14 @@
-// Chanty plugin module implements monitor websocket behavior.
 import { randomUUID } from "node:crypto";
 import { captureWsEvent, createDebugProxyWebSocketAgent, resolveDebugProxySettings, } from "openclaw/plugin-sdk/proxy-capture";
 import WebSocket from "ws";
 import { rawDataToString } from "./monitor-helpers.js";
-// Chanty events can include double-encoded post props plus server/plugin metadata.
-// Keep channel-compatible headroom while bounding ws's 100 MiB default before parsing.
 export const CHANTY_WEBSOCKET_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
-const ChantyEventPayloadSchema = {}; /* z.object({
-  eventType: z.string().required()
-}) as z.ZodType<ChantyEventPayload>; */
+const ChantyEventPayloadSchema = {};
 function parseChantyEventPayload(raw) {
-    return JSON.parse(raw); //safeParseJsonWithSchema(ChantyEventPayloadSchema, raw);
+    return JSON.parse(raw);
 }
 function parseChantyPost(value) {
-    // @todo
     return {};
-    /* if (typeof value === "string") {
-      return safeParseJsonWithSchema(ChantyPostSchema, value);
-    }
-    return safeParseWithSchema(ChantyPostSchema, value); */
 }
 export class WebSocketClosedBeforeOpenError extends Error {
     code;
@@ -67,12 +57,11 @@ export function createChantyConnectOnce(opts) {
             return await new Promise((resolve, reject) => {
                 let opened = false;
                 let settled = false;
-                let healthCheckEnabled = false; // getBotUpdateAt != null;
+                let healthCheckEnabled = false;
                 let healthCheckInFlight = false;
                 let healthCheckTimer;
                 let protocolKeepaliveEnabled = true;
                 let protocolPingInterval;
-                // let protocolPongTimer: ReturnType<typeof setTimeout> | undefined;
                 let initialUpdateAt;
                 const clearTimers = () => {
                     if (healthCheckTimer !== undefined) {
@@ -83,10 +72,6 @@ export function createChantyConnectOnce(opts) {
                         clearInterval(protocolPingInterval);
                         protocolPingInterval = undefined;
                     }
-                    /* if (protocolPongTimer !== undefined) {
-                      clearTimeout(protocolPongTimer);
-                      protocolPongTimer = undefined;
-                    } */
                 };
                 const stopHealthChecks = () => {
                     healthCheckEnabled = false;
@@ -97,18 +82,6 @@ export function createChantyConnectOnce(opts) {
                     if (!protocolKeepaliveEnabled || settled) {
                         return;
                     }
-                    /* if (protocolPongTimer !== undefined) {
-                      clearTimeout(protocolPongTimer);
-                    }
-                    protocolPongTimer = setTimeout(() => {
-                      protocolPongTimer = undefined;
-                      if (!protocolKeepaliveEnabled || settled) {
-                        return;
-                      }
-                      opts.runtime.error?.("chanty websocket pong timeout — reconnecting");
-                      stopHealthChecks();
-                      ws.terminate();
-                    }, pongTimeoutMs); */
                     try {
                         const p = `ping:${new Date().getTime()}`;
                         ws.send(p);
@@ -204,37 +177,10 @@ export function createChantyConnectOnce(opts) {
                         lastConnectedAt: Date.now(),
                         lastError: null,
                     });
-                    /* const authPayload = JSON.stringify({
-                      seq: opts.nextSeq(),
-                      action: "authentication_challenge",
-                      data: { token: opts.botToken },
-                    });
-                    captureWsEvent({
-                      url: opts.wsUrl,
-                      direction: "outbound",
-                      kind: "ws-frame",
-                      flowId,
-                      payload: authPayload,
-                      meta: { subsystem: "chanty-websocket", eventType: "authentication_challenge" },
-                    });
-                    ws.send(authPayload); */
                     scheduleProtocolPing();
-                    // Periodically check if the bot account was modified (e.g. disable/enable).
-                    // After such a cycle the WebSocket silently stops delivering events even
-                    // though the connection itself stays alive.  Comparing update_at detects
-                    // this reliably regardless of how quickly the cycle happens.
                     if (getBotUpdateAt) {
-                        // Use a recursive timeout so only one REST poll can be in flight at a time.
-                        // void runHealthCheck();
                     }
                 });
-                /* ws.on("pong", () => {
-                  if (protocolPongTimer !== undefined) {
-                    clearTimeout(protocolPongTimer);
-                    protocolPongTimer = undefined;
-                  }
-                  scheduleProtocolPing();
-                }); */
                 ws.on("message", async (data) => {
                     captureWsEvent({
                         url: opts.wsUrl,
@@ -249,24 +195,9 @@ export function createChantyConnectOnce(opts) {
                     if (!payload) {
                         return;
                     }
-                    /* if (payload.event === "reaction_added" || payload.event === "reaction_removed") {
-                      if (!opts.onReaction) {
-                        return;
-                      }
-                      try {
-                        await opts.onReaction(payload);
-                      } catch (err) {
-                        opts.runtime.error?.(`chanty reaction handler failed: ${String(err)}`);
-                      }
-                      return;
-                    } */
                     if (payload?.eventType !== "message_post") {
                         return;
                     }
-                    /* const parsed = parsePostedPayload(payload);
-                    if (!parsed) {
-                      return;
-                    } */
                     try {
                         await opts.onPosted(payload);
                     }

@@ -1,4 +1,3 @@
-// Chanty plugin module implements group mentions behavior.
 import { resolveChannelGroupRequireMention } from "openclaw/plugin-sdk/channel-policy";
 import { resolveChantyAccount } from "./chanty/accounts.js";
 export function resolveChantyGroupRequireMention(params) {

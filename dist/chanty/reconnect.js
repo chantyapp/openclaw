@@ -1,11 +1,3 @@
-/**
- * Reconnection loop with exponential backoff.
- *
- * Calls `connectFn` in a while loop. On normal resolve (connection closed),
- * the backoff resets. On thrown error (connection failed), the current delay is
- * used, then doubled for the next retry.
- * The loop exits when `abortSignal` fires.
- */
 export async function runWithReconnect(connectFn, opts = {}) {
     const { initialDelayMs = 2000, maxDelayMs = 60_000 } = opts;
     const jitterRatio = Math.max(0, opts.jitterRatio ?? 0);

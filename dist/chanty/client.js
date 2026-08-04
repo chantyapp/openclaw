@@ -1,23 +1,13 @@
-// Chanty plugin module implements client behavior.
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import { readProviderJsonResponse, readResponseTextLimited, } from "openclaw/plugin-sdk/provider-http";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
 import { sleep } from "openclaw/plugin-sdk/runtime-env";
 import { fetchWithSsrFGuard, ssrfPolicyFromPrivateNetworkOptIn, } from "openclaw/plugin-sdk/ssrf-runtime";
 import { normalizeLowercaseStringOrEmpty, normalizeOptionalString, } from "openclaw/plugin-sdk/string-coerce-runtime";
-// import { z } from "zod";
 const CHANTY_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
-// Chanty REST control-plane JSON (posts, users, channels, file-upload
-// results) stays well under a megabyte; cap successful JSON the same way the
-// shared provider path is capped so an untrusted/self-hosted homeserver cannot
-// stream an unbounded body into the runtime before parsing.
-// Non-JSON success bodies are a rare fallback (the API is JSON-first); keep a
-// generous text budget but still bound it instead of buffering the whole stream.
 const CHANTY_TEXT_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
-export const ChantyPostSchema = {}; /* z
-  .object({})
-  .passthrough();*/
+export const ChantyPostSchema = {};
 export function normalizeChantyBaseUrl(raw) {
     const trimmed = raw?.trim();
     if (!trimmed) {
@@ -110,9 +100,6 @@ export function createChantyClient(params) {
         throw new Error("Chanty baseUrl is required");
     }
     const token = params.botToken.trim();
-    // When no custom fetchImpl is provided (production path), use an SSRF-guarded wrapper
-    // that validates the target URL before making the request (DNS rebinding protection etc.).
-    // A custom fetchImpl is accepted for testing and special cases.
     const externalFetchImpl = params.fetchImpl;
     const guardedFetchImpl = async (input, init) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -149,7 +136,6 @@ export function createChantyClient(params) {
     return { baseUrl, token, request, fetchImpl };
 }
 export async function fetchChantyMe(client) {
-    // @todo response model
     return (await client.request("/api/oauth2/user/auth/get"))?.data;
 }
 export async function fetchChantyUser(client, userId) {
@@ -165,17 +151,6 @@ export async function fetchChantyChannelByName(client, teamId, channelName) {
     return await client.request(`/teams/${teamId}/channels/name/${encodeURIComponent(channelName)}`);
 }
 export async function sendChantyTyping(client, params) {
-    /* const payload: Record<string, string> = {
-      channel_id: params.channelId,
-    };
-    const parentId = params.parentId?.trim();
-    if (parentId) {
-      payload.parent_id = parentId;
-    }
-    await client.request<Record<string, unknown>>("/users/me/typing", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }); */
     try {
         client.ws?.send(`typing:${params.channelId}`);
     }
@@ -191,7 +166,6 @@ export async function createChantyDirectChannel(client, userIds, signal) {
     });
 }
 const DM_REPLY_DELIVERY_BARRIER_TIMEOUT_MS = 60_000;
-/** Covers DM creation retries without extending channel-delivery stalls. */
 export function resolveChantyReplyDeliveryBarrierTimeoutMs(params) {
     if (!params.isDirect) {
         return undefined;
@@ -245,18 +219,12 @@ const RETRYABLE_NETWORK_MESSAGE_SNIPPETS = [
     "socket hang up",
     "getaddrinfo",
 ];
-/**
- * Creates a Chanty DM channel with exponential backoff retry logic.
- * Retries on transient errors (429, 5xx, network errors) but not on
- * client errors (4xx except 429) or permanent failures.
- */
 export async function createChantyDirectChannelWithRetry(client, userIds, options = {}) {
     const { maxRetries = 3, initialDelayMs = 1000, maxDelayMs = 10000, timeoutMs: rawTimeoutMs = 30000, onRetry, } = options;
     const timeoutMs = resolveTimerTimeoutMs(rawTimeoutMs, 30000);
     let lastError;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            // Use AbortController for per-request timeout
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
             try {
@@ -269,24 +237,18 @@ export async function createChantyDirectChannelWithRetry(client, userIds, option
         }
         catch (err) {
             lastError = err instanceof Error ? err : new Error(String(err));
-            // Don't retry on the last attempt
             if (attempt >= maxRetries) {
                 break;
             }
-            // Check if error is retryable
             if (!isRetryableError(lastError)) {
                 throw lastError;
             }
-            // Calculate exponential backoff delay with full-jitter
-            // Jitter is proportional to the exponential delay, not a fixed 1000ms
-            // This ensures backoff behaves correctly for small delay configurations
             const exponentialDelay = initialDelayMs * 2 ** attempt;
             const jitter = Math.random() * exponentialDelay;
             const delayMs = Math.min(exponentialDelay + jitter, maxDelayMs);
             if (onRetry) {
                 onRetry(attempt + 1, delayMs, lastError);
             }
-            // Wait before retrying
             await sleep(delayMs);
         }
     }
@@ -297,21 +259,12 @@ function isRetryableError(error) {
     const messages = candidates
         .map((candidate) => normalizeLowercaseStringOrEmpty(readErrorMessage(candidate)))
         .filter((message) => Boolean(message));
-    // Retry on 5xx server errors FIRST (before checking 4xx)
-    // Use "chanty api" prefix to avoid matching port numbers (e.g., :443) or IP octets
-    // This prevents misclassification when a 5xx error detail contains a 4xx substring
-    // e.g., "Chanty API 503: upstream returned 404"
     if (messages.some((message) => /chanty api 5\d{2}\b/.test(message))) {
         return true;
     }
-    // Check for explicit 429 rate limiting FIRST (before generic "429" text match)
-    // This avoids retrying when error detail contains "429" but it's not the status code
     if (messages.some((message) => /chanty api 429\b/.test(message) || message.includes("too many requests"))) {
         return true;
     }
-    // Check for explicit 4xx status codes - these are client errors and should NOT be retried
-    // (except 429 which is handled above)
-    // Use "chanty api" prefix to avoid matching port numbers like :443
     for (const message of messages) {
         const clientErrorMatch = message.match(/chanty api (4\d{2})\b/);
         if (!clientErrorMatch) {
@@ -322,10 +275,6 @@ function isRetryableError(error) {
             return false;
         }
     }
-    // Retry on network/transient errors only if no explicit Chanty API status code is present
-    // This avoids false positives like:
-    // - "400 Bad Request: connection timed out" (has status code)
-    // - "connect ECONNRESET 104.18.32.10:443" (has port number, not status)
     const hasChantyApiStatusCode = messages.some((message) => /chanty api \d{3}\b/.test(message));
     if (hasChantyApiStatusCode) {
         return false;

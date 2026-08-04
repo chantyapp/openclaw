@@ -1,4 +1,3 @@
-// Chanty plugin module implements interactions behavior.
 import { createHmac } from "node:crypto";
 import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeOptionalString, normalizeStringifiedOptionalString, } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -8,7 +7,6 @@ import { isTrustedProxyAddress, readRequestBodyWithLimit, resolveClientIp, } fro
 const INTERACTION_MAX_BODY_BYTES = 64 * 1024;
 const INTERACTION_BODY_TIMEOUT_MS = 10_000;
 const SIGNED_CHANNEL_ID_CONTEXT_KEY = "__openclaw_channel_id";
-// ── Callback URL registry ──────────────────────────────────────────────
 const callbackUrls = new Map();
 export function setInteractionCallbackUrl(accountId, url) {
     callbackUrls.set(accountId, url);
@@ -47,14 +45,8 @@ function isAllowedInteractionSource(params) {
     });
     return isTrustedProxyAddress(clientIp, allowedSourceIps);
 }
-/**
- * Resolve the interaction callback URL for an account.
- * Falls back to computing it from interactions.callbackBaseUrl or gateway host config.
- */
 export function computeInteractionCallbackUrl(accountId, cfg) {
     const path = resolveInteractionCallbackPath(accountId);
-    // Prefer merged per-account config when available, but keep the top-level path for
-    // callers/tests that still pass the root Chanty config shape directly.
     const callbackBaseUrl = normalizeOptionalString(cfg?.interactions?.callbackBaseUrl) ??
         normalizeOptionalString(cfg?.channels?.chanty?.interactions?.callbackBaseUrl);
     if (callbackBaseUrl) {
@@ -64,17 +56,11 @@ export function computeInteractionCallbackUrl(accountId, cfg) {
     let host = cfg?.gateway?.customBindHost && !isWildcardBindHost(cfg.gateway.customBindHost)
         ? cfg.gateway.customBindHost.trim()
         : "localhost";
-    // Bracket IPv6 literals so the URL is valid: http://[::1]:18789/...
     if (host.includes(":") && !(host.startsWith("[") && host.endsWith("]"))) {
         host = `[${host}]`;
     }
     return `http://${host}:${port}${path}`;
 }
-/**
- * Resolve the interaction callback URL for an account.
- * Prefers the in-memory registered URL (set by the gateway monitor) so callers outside the
- * monitor lifecycle can reuse the runtime-validated callback destination.
- */
 export function resolveInteractionCallbackUrl(accountId, cfg) {
     const cached = callbackUrls.get(accountId);
     if (cached) {
@@ -82,8 +68,6 @@ export function resolveInteractionCallbackUrl(accountId, cfg) {
     }
     return computeInteractionCallbackUrl(accountId, cfg);
 }
-// ── HMAC token management ──────────────────────────────────────────────
-// Secret is derived from the bot token so it's stable across CLI and gateway processes.
 const interactionSecrets = new Map();
 let defaultInteractionSecret;
 function deriveInteractionSecret(botToken) {
@@ -94,7 +78,6 @@ export function setInteractionSecret(accountIdOrBotToken, botToken) {
         interactionSecrets.set(accountIdOrBotToken, deriveInteractionSecret(botToken));
         return;
     }
-    // Backward-compatible fallback for call sites/tests that only pass botToken.
     defaultInteractionSecret = deriveInteractionSecret(accountIdOrBotToken);
 }
 export function getInteractionSecret(accountId) {
@@ -105,7 +88,6 @@ export function getInteractionSecret(accountId) {
     if (defaultInteractionSecret) {
         return defaultInteractionSecret;
     }
-    // Fallback for single-account runtimes that only registered scoped secrets.
     if (interactionSecrets.size === 1) {
         const first = interactionSecrets.values().next().value;
         if (typeof first === "string") {
@@ -136,19 +118,6 @@ export function verifyInteractionToken(context, token, accountId) {
     const expected = generateInteractionToken(context, accountId);
     return safeEqualSecret(expected, token);
 }
-/**
- * Build Chanty `props.attachments` with interactive buttons.
- *
- * Each button includes an HMAC token in its integration context so the
- * callback handler can verify the request originated from a legitimate
- * button click (Chanty's recommended security pattern).
- */
-/**
- * Sanitize a button ID so Chanty's action router can match it.
- * Chanty uses the action ID in the URL path `/api/v4/posts/{id}/actions/{actionId}`
- * and IDs containing hyphens or underscores break the server-side routing.
- * See: https://github.com/chanty/chanty/issues/25747
- */
 function sanitizeActionId(id) {
     return id.replace(/[-_]/g, "");
 }
@@ -208,14 +177,12 @@ export function buildButtonProps(params) {
         }),
     };
 }
-// ── Request body reader ────────────────────────────────────────────────
 function readInteractionBody(req) {
     return readRequestBodyWithLimit(req, {
         maxBytes: INTERACTION_MAX_BODY_BYTES,
         timeoutMs: INTERACTION_BODY_TIMEOUT_MS,
     });
 }
-// ── HTTP handler ───────────────────────────────────────────────────────
 export function createChantyInteractionHandler(params) {
     const { client, accountId, log } = params;
     const core = getChantyRuntime();
@@ -228,7 +195,6 @@ export function createChantyInteractionHandler(params) {
         }
     }
     return async (req, res) => {
-        // Only accept POST
         if (req.method !== "POST") {
             res.statusCode = 405;
             res.setHeader("Allow", "POST");
@@ -267,7 +233,6 @@ export function createChantyInteractionHandler(params) {
             res.end(JSON.stringify({ error: "Missing context" }));
             return;
         }
-        // Verify HMAC token
         const token = context["_token"];
         if (typeof token !== "string") {
             log?.("chanty interaction: missing _token in context");
@@ -276,7 +241,6 @@ export function createChantyInteractionHandler(params) {
             res.end(JSON.stringify({ error: "Missing token" }));
             return;
         }
-        // Strip _token before verification (it wasn't in the original context)
         const { _token, ...contextWithoutToken } = context;
         if (!verifyInteractionToken(contextWithoutToken, token, accountId)) {
             log?.("chanty interaction: invalid _token");
@@ -317,7 +281,6 @@ export function createChantyInteractionHandler(params) {
                 return;
             }
             originalMessage = originalPost.message ?? "";
-            // Ensure the callback can only target an action that exists on the original post.
             const postAttachments = Array.isArray(originalPost?.props?.attachments)
                 ? originalPost.props.attachments
                 : [];
@@ -401,9 +364,6 @@ export function createChantyInteractionHandler(params) {
                 return;
             }
         }
-        // Dispatch as system event so the agent can handle it.
-        // Wrapped in try/catch — the post update below must still run even if
-        // system event dispatch fails (e.g. missing sessionKey or channel lookup).
         try {
             const eventLabel = `Chanty button click: action="${actionId}" ` +
                 `by ${payload.user_name ?? payload.user_id} ` +
@@ -423,7 +383,6 @@ export function createChantyInteractionHandler(params) {
         catch (err) {
             log?.(`chanty interaction: system event dispatch failed: ${String(err)}`);
         }
-        // Update the post via API to replace buttons with a completion indicator.
         try {
             await updateChantyPost(client, payload.post_id, {
                 message: originalMessage,
@@ -439,11 +398,9 @@ export function createChantyInteractionHandler(params) {
         catch (err) {
             log?.(`chanty interaction: failed to update post ${payload.post_id}: ${String(err)}`);
         }
-        // Respond with empty JSON — the post update is handled above
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end("{}");
-        // Dispatch a synthetic inbound message so the agent responds to the button click.
         if (params.dispatchButtonClick) {
             try {
                 await params.dispatchButtonClick({

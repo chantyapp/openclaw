@@ -1,4 +1,3 @@
-// Chanty plugin module implements target resolution behavior.
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveChantyAccount } from "./accounts.js";
@@ -7,7 +6,6 @@ const chantyOpaqueTargetCache = new Map();
 function cacheKey(baseUrl, token, id) {
     return `${baseUrl}::${token}::${id}`;
 }
-/** Chanty IDs are 26-character lowercase alphanumeric strings. */
 export function isChantyId(value) {
     return /^[a-z0-9]{26}$/.test(value);
 }

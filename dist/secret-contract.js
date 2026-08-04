@@ -1,4 +1,3 @@
-// Chanty plugin module implements secret contract behavior.
 import { collectSimpleChannelFieldAssignments, getChannelSurface, } from "openclaw/plugin-sdk/channel-secret-basic-runtime";
 export const secretTargetRegistryEntries = [
     {

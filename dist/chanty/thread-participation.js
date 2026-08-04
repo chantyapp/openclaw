@@ -1,18 +1,9 @@
-// Chanty plugin module implements thread participation cache behavior.
 import { createPersistentDedupeCache } from "openclaw/plugin-sdk/dedupe-runtime";
 import { getOptionalChantyRuntime } from "../runtime.js";
-/**
- * Cache of Chanty threads the bot has replied in. Lets the bot auto-respond
- * to thread follow-ups without a re-mention after its first visible reply.
- */
-const TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 const PERSISTENT_MAX_ENTRIES = 1000;
 const PERSISTENT_NAMESPACE = "chanty.thread-participation";
-/**
- * Keep thread participation shared across bundled chunks so thread auto-reply
- * gating does not diverge between the inbound-gate and reply-dispatch paths.
- */
 const CHANTY_THREAD_PARTICIPATION_KEY = Symbol.for("openclaw.chantyThreadParticipation");
 const threadParticipation = createPersistentDedupeCache({
     globalKey: CHANTY_THREAD_PARTICIPATION_KEY,
@@ -31,7 +22,6 @@ const threadParticipation = createPersistentDedupeCache({
                 });
             }
             catch {
-                // Best effort only: persistent state must never break Chanty message handling.
             }
         },
     },
@@ -44,7 +34,6 @@ export function recordChantyThreadParticipation(accountId, channelId, threadRoot
         return;
     }
     void threadParticipation.register(makeKey(accountId, channelId, threadRootId), {
-        // Stored for future per-agent thread routing; current reads only need presence.
         ...(opts?.agentId ? { agentId: opts.agentId } : {}),
         repliedAt: Date.now(),
     });

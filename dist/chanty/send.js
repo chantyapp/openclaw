@@ -1,4 +1,3 @@
-// Chanty plugin module implements send behavior.
 import { createMessageReceiptFromOutboundResults, } from "openclaw/plugin-sdk/channel-outbound";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
@@ -164,7 +163,6 @@ async function resolveChannelIdByName(params) {
             }
         }
         catch {
-            // Channel not found in this team, try next
         }
     }
     throw new Error(`Chanty channel "#${name}" not found in any team the bot belongs to`);
@@ -188,54 +186,6 @@ function mergeDmRetryOptions(base, override) {
 }
 async function resolveTargetChannelId(params) {
     return params.target?.name;
-    /* if (params.target.kind === "channel") {
-      return params.target.id;
-    }
-    if (params.target.kind === "channel-name") {
-      return await resolveChannelIdByName({
-        baseUrl: params.baseUrl,
-        token: params.token,
-        name: params.target.name,
-        allowPrivateNetwork: params.allowPrivateNetwork,
-      });
-    }
-    const userId = params.target.id
-      ? params.target.id
-      : await resolveUserIdByUsername({
-          baseUrl: params.baseUrl,
-          token: params.token,
-          username: params.target.username ?? "",
-          allowPrivateNetwork: params.allowPrivateNetwork,
-        });
-    const dmKey = `${cacheKey(params.baseUrl, params.token)}::dm::${userId}`;
-    const cachedDm = dmChannelCache.get(dmKey);
-    if (cachedDm) {
-      return cachedDm;
-    }
-    const botUser = await resolveBotUser(params.baseUrl, params.token, params.allowPrivateNetwork);
-    const client = createChantyClient({
-      baseUrl: params.baseUrl,
-      botToken: params.token,
-      allowPrivateNetwork: params.allowPrivateNetwork,
-    });
-  
-    const resolution = createChantyDirectChannelWithRetry(client, [botUser.id, userId], {
-      ...params.dmRetryOptions,
-      onRetry: (attempt, delayMs, error) => {
-        // Call user's onRetry if provided
-        params.dmRetryOptions?.onRetry?.(attempt, delayMs, error);
-        // Log if verbose mode is enabled
-        if (params.logger) {
-          params.logger.warn?.(
-            `DM channel creation retry ${attempt} after ${delayMs}ms: ${error.message}`,
-          );
-        }
-      },
-    });
-    params.onDmChannelResolution?.(resolution);
-    const channel = await resolution;
-    dmChannelCache.set(dmKey, channel.id);
-    return channel.id; */
 }
 async function resolveChantySendContext(to, opts) {
     const core = getCore();
@@ -267,7 +217,6 @@ async function resolveChantySendContext(to, opts) {
         : opaqueTarget?.kind === "channel"
             ? { kind: "channel", id: opaqueTarget.id }
             : parseChantyTarget(trimmedTo);
-    // Build retry options from account config, allowing opts to override
     const accountRetryConfig = account.config.dmChannelRetry
         ? {
             maxRetries: account.config.dmChannelRetry.maxRetries,
@@ -303,63 +252,10 @@ export async function sendMessageChanty(to, text, opts) {
         const { cfg, accountId, token, baseUrl, channelId, allowPrivateNetwork } = await resolveChantySendContext(to, opts);
         const client = createChantyClient({ baseUrl, botToken: token, allowPrivateNetwork });
         let props = opts.props;
-        /* if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
-          setInteractionSecret(accountId, token);
-          props = buildButtonProps({
-            callbackUrl: resolveInteractionCallbackUrl(accountId, {
-              gateway: cfg.gateway,
-              interactions: resolveChantyAccount({
-                cfg,
-                accountId,
-              }).config?.interactions,
-            }),
-            accountId,
-            channelId,
-            buttons: opts.buttons,
-            text: opts.attachmentText,
-          });
-        } */
         let message = normalizeOptionalString(text) ?? "";
         let fileIds;
         let uploadError;
         const mediaUrl = opts.mediaUrl?.trim();
-        /* if (mediaUrl) {
-          try {
-            const media = await loadOutboundMediaFromUrl(mediaUrl, {
-              mediaLocalRoots: opts.mediaLocalRoots,
-              mediaReadFile: opts.mediaReadFile,
-              workspaceDir: opts.workspaceDir,
-            });
-            const fileInfo = await uploadChantyFile(client, {
-              channelId,
-              buffer: media.buffer,
-              fileName: media.fileName ?? "upload",
-              contentType: media.contentType ?? undefined,
-            });
-            fileIds = [fileInfo.id];
-          } catch (err) {
-            uploadError = err instanceof Error ? err : new Error(String(err));
-            if (opts.requireMediaUpload) {
-              throw new Error(`Chanty media upload failed: ${uploadError.message}`, {
-                cause: err,
-              });
-            }
-            if (core.logging.shouldLogVerbose()) {
-              logger.debug?.(
-                `chanty send: media upload failed, falling back to URL text: ${String(err)}`,
-              );
-            }
-            message = normalizeMessage(message, isHttpUrl(mediaUrl) ? mediaUrl : "");
-          }
-        } */
-        /* if (message) {
-          const tableMode = resolveMarkdownTableMode({
-            cfg,
-            channel: "chanty",
-            accountId,
-          });
-          message = convertMarkdownTables(message, tableMode);
-        } */
         if (!message && (!fileIds || fileIds.length === 0)) {
             if (uploadError) {
                 throw new Error(`Chanty media upload failed: ${uploadError.message}`, {

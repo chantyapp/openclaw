@@ -15,8 +15,6 @@ export { logTypingFailure } from "openclaw/plugin-sdk/channel-feedback";
 export { loadOutboundMediaFromUrl } from "openclaw/plugin-sdk/outbound-media";
 export { rawDataToString } from "openclaw/plugin-sdk/webhook-ingress";
 export { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
-// Legacy map-helper exports stay for older plugin consumers. New message-turn
-// code should use createChannelHistoryWindow.
 export { DEFAULT_GROUP_HISTORY_LIMIT, createChannelHistoryWindow, buildPendingHistoryContextFromMap, clearHistoryEntriesIfEnabled, recordPendingHistoryEntryIfEnabled, } from "openclaw/plugin-sdk/reply-history";
 export { normalizeAccountId, resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
 export { resolveAllowlistMatchSimple } from "openclaw/plugin-sdk/allow-from";

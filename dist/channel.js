@@ -286,7 +286,6 @@ const chantyMessageActions = {
         if (action !== "send") {
             throw new Error(`Unsupported Chanty action: ${action}`);
         }
-        // Send action with optional interactive buttons
         const to = typeof params.to === "string"
             ? params.to.trim()
             : typeof params.target === "string"
@@ -304,9 +303,6 @@ const chantyMessageActions = {
             : typeof params.message === "string"
                 ? params.message
                 : "";
-        // Chanty post root_id is the thread root. A generic replyTo can name
-        // the current child post, so prefer threadId unless the caller supplied the
-        // Chanty-specific replyToId root directly.
         const replyToId = normalizeOptionalString(params.replyToId) ??
             normalizeOptionalString(params.threadId) ??
             normalizeOptionalString(params.replyTo);
@@ -534,7 +530,6 @@ const chantyOutbound = {
         }),
     }),
 };
-// @todo draft preview
 const chantyMessageAdapter = createChannelMessageAdapterFromOutbound({
     id: "chanty",
     outbound: chantyOutbound,

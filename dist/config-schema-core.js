@@ -1,10 +1,8 @@
-// Chanty helper module supports config schema core behavior.
 import { BlockStreamingCoalesceSchema, DmPolicySchema, GroupPolicySchema, MarkdownConfigSchema, requireOpenAllowFrom, } from "openclaw/plugin-sdk/channel-config-primitives";
 import { z } from "zod";
 import { buildSecretInputSchema } from "./secret-input.js";
 const ChantyGroupSchema = z
     .object({
-    /** Whether mentions are required to trigger the bot in this group. */
     requireMention: z.boolean().optional(),
 })
     .strict();
@@ -19,13 +17,9 @@ function requireChantyOpenAllowFrom(params) {
 }
 const DmChannelRetrySchema = z
     .object({
-    /** Maximum number of retry attempts for DM channel creation (default: 3) */
     maxRetries: z.number().int().min(0).max(10).optional(),
-    /** Initial delay in milliseconds before first retry (default: 1000) */
     initialDelayMs: z.number().int().min(100).max(60000).optional(),
-    /** Maximum delay in milliseconds between retries (default: 10000) */
     maxDelayMs: z.number().int().min(1000).max(60000).optional(),
-    /** Timeout for each individual DM channel creation request in milliseconds (default: 30000) */
     timeoutMs: z.number().int().min(5000).max(120000).optional(),
 })
     .strict()
@@ -41,20 +35,15 @@ const DmChannelRetrySchema = z
     .optional();
 const ChantySlashCommandsSchema = z
     .object({
-    /** Enable native slash commands. "auto" resolves to false (opt-in). */
     native: z.union([z.boolean(), z.literal("auto")]).optional(),
-    /** Also register skill-based commands. */
     nativeSkills: z.union([z.boolean(), z.literal("auto")]).optional(),
-    /** Path for the callback endpoint on the gateway HTTP server. */
     callbackPath: z.string().optional(),
-    /** Explicit callback URL (e.g. behind reverse proxy). */
     callbackUrl: z.string().optional(),
 })
     .strict()
     .optional();
 const ChantyNetworkSchema = z
     .object({
-    /** Dangerous opt-in for self-hosted Chanty on trusted private/internal hosts. */
     dangerouslyAllowPrivateNetwork: z.boolean().optional(),
 })
     .strict()
@@ -129,11 +118,8 @@ const ChantyAccountSchemaBase = z
         allowedSourceIps: z.array(z.string()).optional(),
     })
         .optional(),
-    /** Per-group configuration (keyed by Chanty channel ID or "*" for default). */
     groups: z.record(z.string(), ChantyGroupSchema.optional()).optional(),
-    /** Network policy overrides for self-hosted Chanty on trusted private/internal hosts. */
     network: ChantyNetworkSchema,
-    /** Retry configuration for DM channel creation */
     dmChannelRetry: DmChannelRetrySchema,
 })
     .strict();

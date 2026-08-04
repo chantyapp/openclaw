@@ -1,4 +1,3 @@
-// Chanty plugin module implements accounts behavior.
 import { createAccountListHelpers, hasConfiguredAccountValue, } from "openclaw/plugin-sdk/account-helpers";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import { resolveMergedAccountConfig } from "openclaw/plugin-sdk/account-resolution";
@@ -76,10 +75,6 @@ export function resolveChantyAccount(params) {
         blockStreamingCoalesce: resolveChannelStreamingBlockCoalesce(merged) ?? merged.blockStreamingCoalesce,
     };
 }
-/**
- * Resolve the effective replyToMode for a given chat type.
- * Chanty auto-threading only applies to channel and group messages.
- */
 export function resolveChantyReplyToMode(account, kind) {
     if (kind === "direct") {
         return "off";

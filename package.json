@@ -1,6 +1,6 @@
 {
   "name": "@chanty/openclaw",
-  "version": "0.0.2-beta",
+  "version": "0.0.3-beta",
   "description": "OpenClaw Chanty channel plugin",
   "repository": {
     "type": "git",

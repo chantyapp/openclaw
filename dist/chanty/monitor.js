@@ -1,4 +1,3 @@
-// Chanty plugin module implements monitor behavior.
 import { defineFinalizableLivePreviewAdapter, deliverWithFinalizableLivePreviewAdapter, } from "openclaw/plugin-sdk/channel-outbound";
 import { buildChannelProgressDraftLineForEntry, createChannelProgressDraftCompositor, resolveChannelStreamingPreviewToolProgress, } from "openclaw/plugin-sdk/channel-outbound";
 import { createClaimableDedupe } from "openclaw/plugin-sdk/persistent-dedupe";
@@ -16,15 +15,12 @@ import { mapChantyChannelTypeToChatType, resolveChantyTrustedChatKind, } from ".
 import { formatInboundFromLabel, normalizeMention, resolveThreadSessionKeys, shouldDropEmptyChantyBody, } from "./monitor-helpers.js";
 import { resolveOncharPrefixes, stripOncharPrefix } from "./monitor-onchar.js";
 import { createChantyMonitorResources, formatChantyInboundMediaText, } from "./monitor-resources.js";
-// import { registerChantyMonitorSlashCommands } from "./monitor-slash.js";
 import { createChantyConnectOnce, } from "./monitor-websocket.js";
 import { evaluateChantyNoVisibleReply, formatChantyNoVisibleReplyLog, } from "./no-visible-reply-diagnostic.js";
 import { runWithReconnect } from "./reconnect.js";
 import { createChantyReplyDeliveryBarrier, deliverChantyReplyPayload, } from "./reply-delivery.js";
 import { buildAgentMediaPayload, createChannelHistoryWindow, createChannelPairingController, createChannelMessageReplyPipeline, DEFAULT_GROUP_HISTORY_LIMIT, logTypingFailure, resolveAllowlistProviderRuntimeGroupPolicy, resolveChannelMediaMaxBytes, resolveDefaultGroupPolicy, warnMissingProviderGroupPolicyFallbackOnce, } from "./runtime-api.js";
 import { sendMessageChanty } from "./send.js";
-// import { cleanupSlashCommands } from "./slash-commands.js";
-// import { deactivateSlashCommands, getSlashCommandState } from "./slash-state.js";
 import { hasChantyThreadParticipationWithPersistence, recordChantyThreadParticipation, } from "./thread-participation.js";
 export { evaluateChantyMentionGate, mapChantyChannelTypeToChatType, resolveChantyTrustedChatKind, } from "./monitor-gating.js";
 export function shouldUpdateChantyDraftToolProgress(account) {
@@ -57,37 +53,11 @@ function buildChantyInboundReplayKeys(params) {
     return uniqueStrings(params.messageIds.map((id) => `${params.accountId}:${id.trim()}`)).filter((key) => !key.endsWith(":"));
 }
 export async function processChantyReplayGuardedPost(params) {
-    /* const replayGuard = params.replayGuard ?? recentInboundMessages;
-    const replayKeys = buildChantyInboundReplayKeys({
-      accountId: params.accountId,
-      messageIds: params.messageIds,
-    });
-    if (replayKeys.length === 0) {
-      await params.handlePost();
-      return "processed";
-    }
-  
-    const claimedKeys: string[] = [];
-    for (const replayKey of replayKeys) {
-      const claim = await replayGuard.claim(replayKey);
-      if (claim.kind === "claimed") {
-        claimedKeys.push(replayKey);
-      }
-    }
-    if (claimedKeys.length === 0) {
-      return "duplicate";
-    } */
     try {
         await params.handlePost();
-        // await Promise.all(claimedKeys.map((replayKey) => replayGuard.commit(replayKey)));
         return "processed";
     }
     catch (error) {
-        /* if (error instanceof ChantyRetryableInboundError) {
-          claimedKeys.forEach((replayKey) => replayGuard.release(replayKey, { error }));
-        } else {
-          await Promise.all(claimedKeys.map((replayKey) => replayGuard.commit(replayKey)));
-        } */
         throw error;
     }
 }
@@ -179,8 +149,6 @@ export async function deliverChantyReplyWithDraftPreview(params) {
             },
             onPreviewFinalized: () => {
                 params.previewState.finalizedViaPreviewPost = true;
-                // The visible final reply landed by editing the preview post, so the normal
-                // deliverPayload record path is skipped; record participation explicitly here.
                 params.recordThreadParticipation?.();
             },
             buildSupplementalPayload: (payload) => getReplyPayloadTtsSupplement(payload) ? buildTtsSupplementMediaPayload(payload) : undefined,
@@ -300,11 +268,6 @@ export async function monitorChantyProvider(opts = {}) {
         botToken,
         allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
     });
-    // Wait for the Chanty API to accept our bot token before proceeding.
-    // When a bot account is disabled and re-enabled, the session is invalidated
-    // and API calls return 401 until the account is fully active again.  Retrying
-    // here (with exponential backoff) keeps the monitor alive and prevents the
-    // framework's auto-restart budget from being exhausted.
     let botUser;
     await runWithReconnect(async () => {
         botUser = await fetchChantyMe(client);
@@ -326,280 +289,6 @@ export async function monitorChantyProvider(opts = {}) {
     const botUserId = botUser?.user?.jid;
     const botUsername = normalizeOptionalString(botUser?.user?.name);
     runtime.log?.(`chanty connected as ${botUserId}`);
-    /* await registerChantyMonitorSlashCommands({
-      client,
-      cfg,
-      runtime,
-      account,
-      baseUrl,
-      botUserId,
-    }); */
-    // const slashEnabled = false; //getSlashCommandState(account.accountId) != null;
-    /*
-    // ─── Interactive buttons registration ──────────────────────────────────────
-    // Derive a stable HMAC secret from the bot token so CLI and gateway share it.
-    setInteractionSecret(account.accountId, botToken);
-  
-    // Register HTTP callback endpoint for interactive button clicks.
-    // Chanty POSTs to this URL when a user clicks a button action.
-    const interactionPath = resolveInteractionCallbackPath(account.accountId);
-  
-    // Recompute from config on each monitor start so reconnects or config reloads can refresh the
-    // cached callback URL for downstream callers such as `message action=send`.
-    const callbackUrl = computeInteractionCallbackUrl(account.accountId, {
-      gateway: cfg.gateway,
-      interactions: account.config.interactions,
-    });
-    setInteractionCallbackUrl(account.accountId, callbackUrl);
-    */
-    /* const allowedInteractionSourceIps = normalizeInteractionSourceIps(
-      account.config.interactions?.allowedSourceIps,
-    ); */
-    /*
-    try {
-      const mmHost = new URL(baseUrl).hostname;
-      const callbackHost = new URL(callbackUrl).hostname;
-      //if (isLoopbackHost(callbackHost) && !isLoopbackHost(mmHost)) {
-      //  runtime.error?.(
-      //    `chanty: interactions callbackUrl resolved to ${callbackUrl} (loopback) while baseUrl is ${baseUrl}. This MAY be unreachable depending on your deployment. If button clicks don't work, set channels.chanty.interactions.callbackBaseUrl to a URL reachable from the Chanty server (e.g. your public reverse proxy URL).`,
-      //  );
-      //}
-      if (!isLoopbackHost(callbackHost) && allowedInteractionSourceIps.length === 0) {
-        runtime.error?.(
-          `chanty: interactions callbackUrl resolved to ${callbackUrl} without channels.chanty.interactions.allowedSourceIps. For safety, non-loopback callback sources will be rejected until you allowlist the Chanty server or trusted ingress IPs.`,
-        );
-      }
-    } catch {
-      // URL parse failed; ignore and continue (we will fail naturally if callbacks cannot be delivered).
-    } */
-    /* const effectiveInteractionSourceIps =
-      allowedInteractionSourceIps.length > 0 ? allowedInteractionSourceIps : ["127.0.0.1", "::1"];
-  
-    const unregisterInteractions = registerPluginHttpRoute({
-      path: interactionPath,
-      fallbackPath: "/chanty/interactions/default",
-      auth: "plugin",
-      handler: createChantyInteractionHandler({
-        client,
-        botUserId,
-        accountId: account.accountId,
-        allowedSourceIps: effectiveInteractionSourceIps,
-        trustedProxies: cfg.gateway?.trustedProxies,
-        allowRealIpFallback: cfg.gateway?.allowRealIpFallback === true,
-        handleInteraction: handleModelPickerInteraction,
-        authorizeButtonClick: async ({ payload, post }) => {
-          const channelInfo = await resolveChannelInfo(payload.channel_id);
-          const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
-            cfg,
-            surface: "chanty",
-          });
-          const decision = await authorizeChantyCommandInvocation({
-            account,
-            cfg,
-            senderId: payload.user_id,
-            senderName: payload.user_name ?? "",
-            channelId: payload.channel_id,
-            channelInfo,
-            readStoreAllowFrom: pairing.readAllowFromStore,
-            allowTextCommands,
-            hasControlCommand: false,
-          });
-          if (decision.ok) {
-            return { ok: true };
-          }
-          return {
-            ok: false,
-            response: {
-              update: {
-                message: post.message ?? "",
-                props: post.props ?? undefined,
-              },
-              ephemeral_text: `OpenClaw ignored this action for ${decision.roomLabel}.`,
-            },
-          };
-        },
-        resolveSessionKey: async ({ channelId, userId, post }) => {
-          const channelInfo = await resolveChannelInfo(channelId);
-          if (!channelInfo?.type) {
-            logVerboseMessage(
-              `chanty: drop interaction session event (cannot resolve channel type for ${channelId})`,
-            );
-            throw new Error("Chanty channel type could not be resolved");
-          }
-          const kind = mapChantyChannelTypeToChatType(channelInfo.type);
-          const teamId = channelInfo?.team_id ?? undefined;
-          const route = core.channel.routing.resolveAgentRoute({
-            cfg,
-            channel: "chanty",
-            accountId: account.accountId,
-            teamId,
-            peer: {
-              kind,
-              id: kind === "direct" ? userId : channelId,
-            },
-          });
-          const replyToMode = resolveChantyReplyToMode(account, kind);
-          return resolveChantyThreadSessionContext({
-            baseSessionKey: route.sessionKey,
-            kind,
-            postId: post.id || undefined,
-            replyToMode,
-            threadRootId: post.root_id,
-          }).sessionKey;
-        },
-        dispatchButtonClick: async (optsLocal) => {
-          const channelInfo = await resolveChannelInfo(optsLocal.channelId);
-          if (!channelInfo?.type) {
-            logVerboseMessage(
-              `chanty: drop interaction dispatch (cannot resolve channel type for ${optsLocal.channelId})`,
-            );
-            return;
-          }
-          const kind = mapChantyChannelTypeToChatType(channelInfo.type);
-          const chatType = channelChatType(kind);
-          const teamId = channelInfo?.team_id ?? undefined;
-          const channelName = channelInfo?.name ?? undefined;
-          const channelDisplay = channelInfo?.display_name ?? channelName ?? optsLocal.channelId;
-          const route = core.channel.routing.resolveAgentRoute({
-            cfg,
-            channel: "chanty",
-            accountId: account.accountId,
-            teamId,
-            peer: {
-              kind,
-              id: kind === "direct" ? optsLocal.userId : optsLocal.channelId,
-            },
-          });
-          const replyToMode = resolveChantyReplyToMode(account, kind);
-          const threadContext = resolveChantyThreadSessionContext({
-            baseSessionKey: route.sessionKey,
-            kind,
-            postId: optsLocal.post.id || optsLocal.postId,
-            replyToMode,
-            threadRootId: optsLocal.post.root_id,
-          });
-          const to =
-            kind === "direct" ? `user:${optsLocal.userId}` : `channel:${optsLocal.channelId}`;
-          const bodyText = `[Button click: user @${optsLocal.userName} selected "${optsLocal.actionName}"]`;
-          const ctxPayload = core.channel.reply.finalizeInboundContext({
-            Body: bodyText,
-            BodyForAgent: bodyText,
-            RawBody: bodyText,
-            CommandBody: bodyText,
-            From:
-              kind === "direct"
-                ? `chanty:${optsLocal.userId}`
-                : kind === "group"
-                  ? `chanty:group:${optsLocal.channelId}`
-                  : `chanty:channel:${optsLocal.channelId}`,
-            To: to,
-            SessionKey: threadContext.sessionKey,
-            ParentSessionKey: threadContext.parentSessionKey,
-            AccountId: route.accountId,
-            ChatType: chatType,
-            ConversationLabel: `chanty:${optsLocal.userName}`,
-            GroupSubject: kind !== "direct" ? channelDisplay : undefined,
-            GroupChannel: channelName ? `#${channelName}` : undefined,
-            GroupSpace: teamId,
-            SenderName: optsLocal.userName,
-            SenderId: optsLocal.userId,
-            Provider: "chanty" as const,
-            Surface: "chanty" as const,
-            MessageSid: `interaction:${optsLocal.postId}:${optsLocal.actionId}`,
-            ReplyToId: threadContext.effectiveReplyToId,
-            MessageThreadId: threadContext.effectiveReplyToId,
-            WasMentioned: true,
-            CommandAuthorized: false,
-            OriginatingChannel: "chanty" as const,
-            OriginatingTo: to,
-          });
-  
-          const textLimit = core.channel.text.resolveTextChunkLimit(
-            cfg,
-            "chanty",
-            account.accountId,
-            { fallbackLimit: account.textChunkLimit ?? 4000 },
-          );
-          const tableMode = core.channel.text.resolveMarkdownTableMode({
-            cfg,
-            channel: "chanty",
-            accountId: account.accountId,
-          });
-          const { onModelSelected, typingCallbacks, ...replyPipeline } =
-            createChannelMessageReplyPipeline({
-              cfg,
-              agentId: route.agentId,
-              channel: "chanty",
-              accountId: account.accountId,
-              typing: {
-                start: () =>
-                  sendTypingIndicator(optsLocal.channelId, threadContext.effectiveReplyToId),
-                onStartError: (err) => {
-                  logTypingFailure({
-                    log: (message) => logger.debug?.(message),
-                    channel: "chanty",
-                    target: optsLocal.channelId,
-                    error: err,
-                  });
-                },
-              },
-            });
-          const deliveryBarrier = createChantyReplyDeliveryBarrier({
-            isDirect: kind === "direct",
-            dmRetryOptions: account.config.dmChannelRetry,
-          });
-          const { dispatcher, replyOptions, markDispatchIdle } =
-            core.channel.reply.createReplyDispatcherWithTyping({
-              ...replyPipeline,
-              resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
-              onDeliverySettled: deliveryBarrier.markDeliverySettled,
-              humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
-              deliver: async (payload: ReplyPayload) => {
-                await deliverChantyReplyPayload({
-                  core,
-                  cfg,
-                  payload,
-                  to,
-                  accountId: account.accountId,
-                  agentId: route.agentId,
-                  replyToId: resolveChantyReplyRootId({
-                    kind,
-                    threadRootId: threadContext.effectiveReplyToId,
-                    replyToId: payload.replyToId,
-                  }),
-                  textLimit,
-                  tableMode,
-                  sendMessage: sendMessageChanty,
-                  onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
-                });
-                runtime.log?.(`delivered button-click reply to ${to}`);
-              },
-              onError: (err, info) => {
-                runtime.error?.(`chanty button-click ${info.kind} reply failed: ${String(err)}`);
-              },
-              onReplyStart: typingCallbacks?.onReplyStart,
-            });
-  
-          await core.channel.reply.dispatchReplyFromConfig({
-            ctx: ctxPayload,
-            cfg,
-            dispatcher,
-            replyOptions: {
-              ...replyOptions,
-              disableBlockStreaming:
-                typeof account.blockStreaming === "boolean" ? !account.blockStreaming : undefined,
-              onModelSelected,
-            },
-          });
-          markDispatchIdle();
-        },
-        log: (msg) => runtime.log?.(msg),
-      }),
-      pluginId: "chanty",
-      source: "chanty-interactions",
-      accountId: account.accountId,
-      log: (msg: string) => runtime.log?.(msg),
-    }); */
     const logger = core.logging.getChildLogger({ module: "chanty" });
     const logVerboseMessage = (message) => {
         if (!core.logging.shouldLogVerbose()) {
@@ -627,11 +316,9 @@ export async function monitorChantyProvider(opts = {}) {
         accountId: account.accountId,
         log: (message) => logVerboseMessage(message),
     });
-    const { resolveChantyMedia, sendTypingIndicator, resolveChannelInfo, resolveUserInfo,
-    // updateModelPickerPost,
-     } = createChantyMonitorResources({
+    const { resolveChantyMedia, sendTypingIndicator, resolveChannelInfo, resolveUserInfo, } = createChantyMonitorResources({
         accountId: account.accountId,
-        callbackUrl: "", // @todo check
+        callbackUrl: "",
         client,
         logger: {
             debug: (message) => logger.debug?.(String(message)),
@@ -640,387 +327,9 @@ export async function monitorChantyProvider(opts = {}) {
         saveRemoteMedia: (params) => core.channel.media.saveRemoteMedia(params),
         mediaKindFromMime: (contentType) => core.media.mediaKindFromMime(contentType),
     });
-    /* const runModelPickerCommand = async (params: {
-      commandText: string;
-      commandAuthorized: boolean;
-      route: ReturnType<typeof core.channel.routing.resolveAgentRoute>;
-      sessionKey: string;
-      parentSessionKey?: string;
-      channelId: string;
-      senderId: string;
-      senderName: string;
-      kind: ChatType;
-      chatType: "direct" | "group" | "channel";
-      channelName?: string;
-      channelDisplay?: string;
-      roomLabel: string;
-      teamId?: string;
-      postId: string;
-      messageSid?: string;
-      effectiveReplyToId?: string;
-      deliverReplies?: boolean;
-    }): Promise<string> => {
-      const to = params.kind === "direct" ? `user:${params.senderId}` : `channel:${params.channelId}`;
-      const fromLabel =
-        params.kind === "direct"
-          ? `Chanty DM from ${params.senderName}`
-          : `Chanty message in ${params.roomLabel} from ${params.senderName}`;
-      const ctxPayload = core.channel.reply.finalizeInboundContext({
-        Body: params.commandText,
-        BodyForAgent: params.commandText,
-        RawBody: params.commandText,
-        CommandBody: params.commandText,
-        From:
-          params.kind === "direct"
-            ? `chanty:${params.senderId}`
-            : params.kind === "group"
-              ? `chanty:group:${params.channelId}`
-              : `chanty:channel:${params.channelId}`,
-        To: to,
-        SessionKey: params.sessionKey,
-        ParentSessionKey: params.parentSessionKey,
-        AccountId: params.route.accountId,
-        ChatType: params.chatType,
-        ConversationLabel: fromLabel,
-        GroupSubject:
-          params.kind !== "direct" ? params.channelDisplay || params.roomLabel : undefined,
-        GroupChannel: params.channelName ? `#${params.channelName}` : undefined,
-        GroupSpace: params.teamId,
-        SenderName: params.senderName,
-        SenderId: params.senderId,
-        Provider: "chanty" as const,
-        Surface: "chanty" as const,
-        MessageSid: params.messageSid ?? `interaction:${params.postId}:${Date.now()}`,
-        ReplyToId: params.effectiveReplyToId,
-        MessageThreadId: params.effectiveReplyToId,
-        Timestamp: Date.now(),
-        WasMentioned: true,
-        CommandAuthorized: params.commandAuthorized,
-        CommandSource: "native" as const,
-        OriginatingChannel: "chanty" as const,
-        OriginatingTo: to,
-      });
-  
-      const tableMode = core.channel.text.resolveMarkdownTableMode({
-        cfg,
-        channel: "chanty",
-        accountId: account.accountId,
-      });
-      const textLimit = core.channel.text.resolveTextChunkLimit(
-        cfg,
-        "chanty",
-        account.accountId,
-        {
-          fallbackLimit: account.textChunkLimit ?? 4000,
-        },
-      );
-      const shouldDeliverReplies = params.deliverReplies === true;
-      const { onModelSelected, typingCallbacks, ...replyPipeline } =
-        createChannelMessageReplyPipeline({
-          cfg,
-          agentId: params.route.agentId,
-          channel: "chanty",
-          accountId: account.accountId,
-          typing: shouldDeliverReplies
-            ? {
-                start: () => sendTypingIndicator(params.channelId, params.effectiveReplyToId),
-                onStartError: (err) => {
-                  logTypingFailure({
-                    log: (message) => logger.debug?.(message),
-                    channel: "chanty",
-                    target: params.channelId,
-                    error: err,
-                  });
-                },
-              }
-            : undefined,
-        });
-      const capturedTexts: string[] = [];
-      const deliveryBarrier = createChantyReplyDeliveryBarrier({
-        isDirect: params.kind === "direct",
-        dmRetryOptions: account.config.dmChannelRetry,
-      });
-      const { dispatcher, replyOptions, markDispatchIdle } =
-        core.channel.reply.createReplyDispatcherWithTyping({
-          ...replyPipeline,
-          resolveFollowupAdmissionBarrierTimeoutPolicy: deliveryBarrier.resolveTimeoutPolicy,
-          onDeliverySettled: deliveryBarrier.markDeliverySettled,
-          // Picker-triggered confirmations should stay immediate.
-          deliver: async (payload: ReplyPayload) => {
-            const trimmedPayload = {
-              ...payload,
-              text: core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode).trim(),
-            };
-  
-            if (!shouldDeliverReplies) {
-              if (trimmedPayload.text) {
-                capturedTexts.push(trimmedPayload.text);
-              }
-              return;
-            }
-  
-            await deliverChantyReplyPayload({
-              core,
-              cfg,
-              payload: trimmedPayload,
-              to,
-              accountId: account.accountId,
-              agentId: params.route.agentId,
-              replyToId: resolveChantyReplyRootId({
-                kind: params.kind,
-                threadRootId: params.effectiveReplyToId,
-                replyToId: trimmedPayload.replyToId,
-              }),
-              textLimit,
-              // The picker path already converts and trims text before capture/delivery.
-              tableMode: "off",
-              sendMessage: sendMessageChanty,
-              onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
-            });
-          },
-          onError: (err, info) => {
-            runtime.error?.(`chanty model picker ${info.kind} reply failed: ${String(err)}`);
-          },
-          onReplyStart: typingCallbacks?.onReplyStart,
-        });
-  
-      await core.channel.reply.withReplyDispatcher({
-        dispatcher,
-        onSettled: () => {
-          markDispatchIdle();
-        },
-        run: () =>
-          core.channel.reply.dispatchReplyFromConfig({
-            ctx: ctxPayload,
-            cfg,
-            dispatcher,
-            replyOptions: {
-              ...replyOptions,
-              disableBlockStreaming:
-                typeof account.blockStreaming === "boolean" ? !account.blockStreaming : undefined,
-              onModelSelected,
-            },
-          }),
-      });
-  
-      return capturedTexts.join("\n\n").trim();
-    }; */
-    /* async function handleModelPickerInteraction(params: {
-      payload: {
-        channel_id: string;
-        post_id: string;
-        team_id?: string;
-        user_id: string;
-      };
-      userName: string;
-      context: Record<string, unknown>;
-      post: ChantyPost;
-    }): Promise<ChantyInteractionResponse | null> {
-      const pickerState = parseChantyModelPickerContext(params.context);
-      if (!pickerState) {
-        return null;
-      }
-  
-      if (pickerState.ownerUserId !== params.payload.user_id) {
-        return {
-          ephemeral_text: "Only the person who opened this picker can use it.",
-        };
-      }
-  
-      const channelInfo = await resolveChannelInfo(params.payload.channel_id);
-      const pickerCommandText =
-        pickerState.action === "select"
-          ? `/model ${pickerState.provider}/${pickerState.model}`
-          : pickerState.action === "list"
-            ? `/models ${pickerState.provider}`
-            : "/models";
-      const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
-        cfg,
-        surface: "chanty",
-      });
-      const hasControlCommand = core.channel.text.hasControlCommand(pickerCommandText, cfg);
-      const auth = await authorizeChantyCommandInvocation({
-        account,
-        cfg,
-        senderId: params.payload.user_id,
-        senderName: params.userName,
-        channelId: params.payload.channel_id,
-        channelInfo,
-        readStoreAllowFrom: pairing.readAllowFromStore,
-        allowTextCommands,
-        hasControlCommand,
-      }) as any;
-      if (!auth.ok) {
-        if (auth.denyReason === "dm-pairing") {
-          const { code } = await pairing.upsertPairingRequest({
-            id: params.payload.user_id,
-            meta: { name: params.userName },
-          });
-          return {
-            ephemeral_text: core.channel.pairing.buildPairingReply({
-              channel: "chanty",
-              idLine: `Your Chanty user id: ${params.payload.user_id}`,
-              code,
-            }),
-          };
-        }
-        const denyText =
-          auth.denyReason === "unknown-channel"
-            ? "Temporary error: unable to determine channel type. Please try again."
-            : auth.denyReason === "dm-disabled"
-              ? "This bot is not accepting direct messages."
-              : auth.denyReason === "channels-disabled"
-                ? "Model picker actions are disabled in channels."
-                : auth.denyReason === "channel-no-allowlist"
-                  ? "Model picker actions are not configured for this channel."
-                  : "Unauthorized.";
-        return {
-          ephemeral_text: denyText,
-        };
-      }
-      const kind = auth.kind;
-      const chatType = auth.chatType;
-      const teamId = auth.channelInfo.team_id ?? params.payload.team_id ?? undefined;
-      const channelName = auth.channelName || undefined;
-      const channelDisplay = auth.channelDisplay || auth.channelName || params.payload.channel_id;
-      const roomLabel = auth.roomLabel;
-      const route = core.channel.routing.resolveAgentRoute({
-        cfg,
-        channel: "chanty",
-        accountId: account.accountId,
-        teamId,
-        peer: {
-          kind,
-          id: kind === "direct" ? params.payload.user_id : params.payload.channel_id,
-        },
-      });
-      const replyToMode = resolveChantyReplyToMode(account, kind);
-      const threadContext = resolveChantyThreadSessionContext({
-        baseSessionKey: route.sessionKey,
-        kind,
-        postId: params.post.id || params.payload.post_id,
-        replyToMode,
-        threadRootId: params.post.root_id,
-      });
-      const modelSessionRoute = {
-        agentId: route.agentId,
-        sessionKey: threadContext.sessionKey,
-      };
-  
-      const data = await buildModelsProviderData(cfg, route.agentId);
-      if (data.providers.length === 0) {
-        return await updateModelPickerPost({
-          channelId: params.payload.channel_id,
-          postId: params.payload.post_id,
-          message: "No models available.",
-        });
-      }
-  
-      if (pickerState.action === "providers" || pickerState.action === "back") {
-        const currentModel = resolveChantyModelPickerCurrentModel({
-          cfg,
-          route: modelSessionRoute,
-          data,
-        });
-        const view = renderChantyProviderPickerView({
-          ownerUserId: pickerState.ownerUserId,
-          data,
-          currentModel,
-        });
-        return await updateModelPickerPost({
-          channelId: params.payload.channel_id,
-          postId: params.payload.post_id,
-          message: view.text,
-          buttons: view.buttons,
-        });
-      }
-  
-      if (pickerState.action === "list") {
-        const currentModel = resolveChantyModelPickerCurrentModel({
-          cfg,
-          route: modelSessionRoute,
-          data,
-        });
-        const view = renderChantyModelsPickerView({
-          ownerUserId: pickerState.ownerUserId,
-          data,
-          provider: pickerState.provider,
-          page: pickerState.page,
-          currentModel,
-        });
-        return await updateModelPickerPost({
-          channelId: params.payload.channel_id,
-          postId: params.payload.post_id,
-          message: view.text,
-          buttons: view.buttons,
-        });
-      }
-  
-      const targetModelRef = `${pickerState.provider}/${pickerState.model}`;
-      if (!buildChantyAllowedModelRefs(data).has(targetModelRef)) {
-        return {
-          ephemeral_text: `That model is no longer available: ${targetModelRef}`,
-        };
-      }
-  
-      void (async () => {
-        try {
-          await runModelPickerCommand({
-            commandText: `/model ${targetModelRef}`,
-            commandAuthorized: auth.commandAuthorized,
-            route,
-            sessionKey: threadContext.sessionKey,
-            parentSessionKey: threadContext.parentSessionKey,
-            channelId: params.payload.channel_id,
-            senderId: params.payload.user_id,
-            senderName: params.userName,
-            kind,
-            chatType,
-            channelName,
-            channelDisplay,
-            roomLabel,
-            teamId,
-            postId: params.payload.post_id,
-            messageSid: buildChantyModelPickerSelectMessageSid({
-              postId: params.payload.post_id,
-              provider: pickerState.provider,
-              model: pickerState.model,
-            }),
-            effectiveReplyToId: threadContext.effectiveReplyToId,
-            deliverReplies: true,
-          });
-          const updatedModel = resolveChantyModelPickerCurrentModel({
-            cfg,
-            route: modelSessionRoute,
-            data,
-            readConsistency: "latest",
-          });
-          const view = renderChantyModelsPickerView({
-            ownerUserId: pickerState.ownerUserId,
-            data,
-            provider: pickerState.provider,
-            page: pickerState.page,
-            currentModel: updatedModel,
-          });
-  
-          await updateModelPickerPost({
-            channelId: params.payload.channel_id,
-            postId: params.payload.post_id,
-            message: view.text,
-            buttons: view.buttons,
-          });
-        } catch (err) {
-          runtime.error?.(`chanty model picker select failed: ${String(err)}`);
-        }
-      })();
-  
-      return {};
-    } */
-    const handlePost = async (
-    // post: ChantyPost,
-    payload, messageIds) => {
+    const handlePost = async (payload, messageIds) => {
         const post = { ...payload };
-        const channelId = post.convJid; //post.channel_id ?? payload.data?.channel_id ?? payload.broadcast?.channel_id;
+        const channelId = post.convJid;
         if (!channelId) {
             logVerboseMessage("chanty: drop post (missing channel id)");
             return;
@@ -1034,7 +343,7 @@ export async function monitorChantyProvider(opts = {}) {
             accountId: account.accountId,
             messageIds: allMessageIds,
             handlePost: async () => {
-                const senderId = post.createdBy.jid; // post.user_id ?? payload.broadcast?.user_id;
+                const senderId = post.createdBy.jid;
                 if (!senderId) {
                     logVerboseMessage("chanty: drop post (missing sender id)");
                     return;
@@ -1046,14 +355,8 @@ export async function monitorChantyProvider(opts = {}) {
                 if (post.msgType !== 'chat') {
                     return;
                 }
-                /* if (isSystemPost(post)) {
-                  logVerboseMessage(`chanty: drop post (system post type=${post.type ?? "unknown"})`);
-                  return;
-                } */
-                const channelInfo = {}; //await resolveChannelInfo(channelId);
+                const channelInfo = {};
                 const channelType = payload.convType;
-                /* normalizeOptionalString(channelInfo?.type) ??
-                normalizeOptionalString(payload.data?.channel_type); */
                 if (!channelType) {
                     logVerboseMessage(`chanty: drop post (cannot resolve channel type for ${channelId})`);
                     return;
@@ -1062,17 +365,14 @@ export async function monitorChantyProvider(opts = {}) {
                     channelType,
                 });
                 const chatType = channelChatType(kind);
-                const senderName = senderId; /*
-                  normalizeOptionalString(payload.data?.sender_name) ??
-                  normalizeOptionalString((await resolveUserInfo(senderId))?.username) ??
-                  senderId; */
-                const rawPostText = post.text; //typeof post.message === "string" ? post.message : "";
+                const senderName = senderId;
+                const rawPostText = post.text;
                 const rawText = normalizeOptionalString(rawPostText) ?? "";
                 const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
                     cfg,
                     surface: "chanty",
                 });
-                const isControlCommand = false; //allowTextCommands && core.channel.commands.isControlCommandMessage(rawText, cfg);
+                const isControlCommand = false;
                 const accessDecision = await resolveChantyMonitorInboundAccess({
                     account,
                     cfg,
@@ -1088,82 +388,9 @@ export async function monitorChantyProvider(opts = {}) {
                     mayPair: true,
                 });
                 const commandAuthorized = accessDecision.commandAccess.authorized;
-                /*
-                if (accessDecision.ingress.decision !== "allow") {
-                  if (kind === "direct") {
-                    if (accessDecision.ingress.reasonCode === "dm_policy_disabled") {
-                      logVerboseMessage(`chanty: drop dm (dmPolicy=disabled sender=${senderId})`);
-                      return;
-                    }
-                    if (accessDecision.ingress.decision === "pairing") {
-                      const { code, created } = await pairing.upsertPairingRequest({
-                        id: senderId,
-                        meta: { name: senderName },
-                      });
-                      logVerboseMessage(
-                        `chanty: pairing request sender=${senderId} created=${created}`,
-                      );
-                      if (created) {
-                        try {
-                          await sendMessageChanty(
-                            `user:${senderId}`,
-                            core.channel.pairing.buildPairingReply({
-                              channel: "chanty",
-                              idLine: `Your Chanty user id: ${senderId}`,
-                              code,
-                            }),
-                            { cfg, accountId: account.accountId },
-                          );
-                          opts.statusSink?.({ lastOutboundAt: Date.now() });
-                        } catch (err) {
-                          logVerboseMessage(
-                            `chanty: pairing reply failed for ${senderId}: ${String(err)}`,
-                          );
-                        }
-                      }
-                      return;
-                    }
-                    logVerboseMessage(
-                      formatChantyDirectMessageDropLog({
-                        senderId,
-                        dmPolicy,
-                        reasonCode: accessDecision.senderAccess.reasonCode,
-                      }),
-                    );
-                    return;
-                  }
-                  if (accessDecision.ingress.reasonCode === "group_policy_disabled") {
-                    logVerboseMessage("chanty: drop group message (groupPolicy=disabled)");
-                    return;
-                  }
-                  if (accessDecision.ingress.reasonCode === "group_policy_empty_allowlist") {
-                    logVerboseMessage("chanty: drop group message (no group allowlist)");
-                    return;
-                  }
-                  if (accessDecision.ingress.reasonCode === "group_policy_not_allowlisted") {
-                    logVerboseMessage(`chanty: drop group sender=${senderId} (not in groupAllowFrom)`);
-                    return;
-                  }
-                  logVerboseMessage(
-                    `chanty: drop group message (groupPolicy=${groupPolicy} reason=${accessDecision.senderAccess.reasonCode})`,
-                  );
-                  return;
-                }
-        
-                */
-                /* if (kind !== "direct" && accessDecision.commandAccess.shouldBlockControlCommand) {
-                  logInboundDrop({
-                    log: logVerboseMessage,
-                    channel: "chanty",
-                    reason: "control command (unauthorized)",
-                    target: senderId,
-                  });
-                  return;
-                } */
-                const teamId = undefined; // payload.data?.team_id ?? channelInfo?.team_id ?? undefined;
-                const channelName = payload.convJid; //payload.data?.channel_name ?? channelInfo?.name ?? "";
+                const teamId = undefined;
+                const channelName = payload.convJid;
                 const channelDisplay = payload.convJid;
-                //payload.data?.channel_display_name ?? channelInfo?.display_name ?? channelName;
                 const roomLabel = channelName ? `#${channelName}` : channelDisplay || `#${channelId}`;
                 const route = core.channel.routing.resolveAgentRoute({
                     cfg,
@@ -1220,8 +447,6 @@ export async function monitorChantyProvider(opts = {}) {
                     : { triggered: false, stripped: rawText };
                 const oncharTriggered = oncharResult.triggered;
                 const canDetectMention = Boolean(botUsername) || mentionRegexes.length > 0;
-                // Threads the bot already replied in auto-engage: follow-ups resume without
-                // a re-mention even under requireMention. Keyed by the thread root id.
                 const threadAlreadyEngaged = kind !== "direct" && effectiveReplyToId
                     ? await hasChantyThreadParticipationWithPersistence({
                         accountId: account.accountId,
@@ -1229,39 +454,6 @@ export async function monitorChantyProvider(opts = {}) {
                         threadRootId: effectiveReplyToId,
                     })
                     : false;
-                /* const mentionDecision = evaluateChantyMentionGate({
-                  kind,
-                  cfg,
-                  accountId: account.accountId,
-                  channelId,
-                  threadRootId,
-                  requireMentionOverride: account.requireMention,
-                  resolveRequireMention: core.channel.groups.resolveRequireMention,
-                  wasMentioned,
-                  threadAlreadyEngaged,
-                  isControlCommand,
-                  commandAuthorized,
-                  oncharEnabled,
-                  oncharTriggered,
-                  canDetectMention,
-                });
-                const { shouldRequireMention, shouldBypassMention } = mentionDecision;
-        
-                if (mentionDecision.dropReason === "onchar-not-triggered") {
-                  logVerboseMessage(
-                    `chanty: drop group message (onchar not triggered channel=${channelId} sender=${senderId})`,
-                  );
-                  recordPendingHistory();
-                  return;
-                }
-        
-                if (mentionDecision.dropReason === "missing-mention") {
-                  logVerboseMessage(
-                    `chanty: drop group message (missing mention channel=${channelId} sender=${senderId} requireMention=${shouldRequireMention} bypass=${shouldBypassMention} canDetectMention=${canDetectMention})`,
-                  );
-                  recordPendingHistory();
-                  return;
-                } */
                 const fileIds = uniqueStrings(normalizeTrimmedStringList(post.file_ids ?? []));
                 const mediaList = await resolveChantyMedia(fileIds);
                 const mediaPlaceholder = buildChantyAttachmentPlaceholder(mediaList);
@@ -1278,8 +470,6 @@ export async function monitorChantyProvider(opts = {}) {
                     logVerboseMessage(`chanty: drop message (empty body after normalization channel=${channelId} sender=${senderId} wasMentioned=${wasMentioned})`);
                     return;
                 }
-                // Mention-only turns need non-empty agent text; the shared reply runner rejects empty
-                // bodies before model invocation. The guard above ensures this fallback is a bot mention.
                 const bodyForAgent = bodyText || rawText.trim();
                 core.channel.activity.record({
                     channel: "chanty",
@@ -1361,12 +551,8 @@ export async function monitorChantyProvider(opts = {}) {
                     ReplyToId: effectiveReplyToId,
                     MessageThreadId: effectiveReplyToId,
                     Timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
-                    WasMentioned: undefined, // kind !== "direct" ? mentionDecision.effectiveWasMentioned : undefined,
+                    WasMentioned: undefined,
                     CommandAuthorized: commandAuthorized,
-                    // Tag typed text-slash control commands (e.g. ` /new`, ` /reset` sent via the regular
-                    // post path rather than Chanty's native slash UI) so the explicit-command turn
-                    // exception in source-reply-delivery-mode.ts surfaces their acknowledgements under
-                    // message_tool_only delivery modes (e.g. Codex harness DMs). Mirrors iMessage #82642.
                     CommandSource: commandAuthorized && isControlCommand ? "text" : undefined,
                     OriginatingChannel: "chanty",
                     OriginatingTo: to,
@@ -1392,7 +578,6 @@ export async function monitorChantyProvider(opts = {}) {
                     channel: "chanty",
                     accountId: account.accountId,
                 });
-                // @note sendTypingIndicator
                 const { onModelSelected, typingCallbacks, ...replyPipeline } = createChannelMessageReplyPipeline({
                     cfg,
                     agentId: route.agentId,
@@ -1411,7 +596,7 @@ export async function monitorChantyProvider(opts = {}) {
                         },
                     },
                 });
-                const draftPreviewEnabled = false; // account.streamingMode !== "off";
+                const draftPreviewEnabled = false;
                 const draftToolProgressEnabled = shouldUpdateChantyDraftToolProgress(account);
                 const suppressDefaultToolProgressMessages = shouldSuppressChantyDefaultToolProgressMessages(account);
                 const draftStream = draftPreviewEnabled
@@ -1494,8 +679,6 @@ export async function monitorChantyProvider(opts = {}) {
                         if (info.kind === "final") {
                             progressDraft.markFinalReplyStarted();
                         }
-                        // A visible same-thread final arrives either via a normal send or by editing
-                        // the draft preview in place; record participation on whichever path fires.
                         const markThreadParticipation = () => {
                             if (kind !== "direct" && effectiveReplyToId) {
                                 recordChantyThreadParticipation(account.accountId, channelId, effectiveReplyToId, { agentId: route.agentId });
@@ -1530,8 +713,6 @@ export async function monitorChantyProvider(opts = {}) {
                                     sendMessage: sendMessageChanty,
                                     onDmChannelResolution: deliveryBarrier.trackDmChannelResolution,
                                 });
-                                // Record only on a visible send so threads we merely observed
-                                // (reasoning-only/empty/suppressed) do not auto-engage later.
                                 if (outcome === "text" || outcome === "media") {
                                     markThreadParticipation();
                                 }
@@ -1749,7 +930,6 @@ export async function monitorChantyProvider(opts = {}) {
         if (!userId || !postId || !emojiName) {
             return;
         }
-        // Skip reactions from the bot itself
         if (userId === botUserId) {
             return;
         }
@@ -1757,21 +937,17 @@ export async function monitorChantyProvider(opts = {}) {
         const action = isRemoved ? "removed" : "added";
         const senderInfo = await resolveUserInfo(userId);
         const senderName = normalizeOptionalString(senderInfo?.username) ?? userId;
-        // Resolve the channel from broadcast or post to route to the correct agent session
         const channelId = resolveChantyReactionChannelId(payload);
         if (!channelId) {
-            // Without a channel id we cannot verify DM/group policies — drop to be safe
             logVerboseMessage(`chanty: drop reaction (no channel_id in broadcast, cannot enforce policy)`);
             return;
         }
         const channelInfo = await resolveChannelInfo(channelId);
         if (!channelInfo?.type) {
-            // Cannot determine channel type — drop to avoid policy bypass
             logVerboseMessage(`chanty: drop reaction (cannot resolve channel type for ${channelId})`);
             return;
         }
         const kind = mapChantyChannelTypeToChatType(channelInfo.type);
-        // Enforce DM/group policy and allowlist checks (same as normal messages).
         const reactionAccess = await resolveChantyMonitorInboundAccess({
             account,
             cfg,
@@ -1821,28 +997,9 @@ export async function monitorChantyProvider(opts = {}) {
     const debouncer = core.channel.debounce.createInboundDebouncer({
         debounceMs: inboundDebounceMs,
         buildKey: (entry) => {
-            /* const channelId =
-              entry.post.channel_id ??
-              entry.payload.data?.channel_id ??
-              entry.payload.broadcast?.channel_id;
-            if (!channelId) {
-              return null;
-            }
-            const threadId = normalizeOptionalString(entry.post.root_id);
-            const threadKey = threadId ? `thread:${threadId}` : "channel"; */
-            // return `chanty:${account.accountId}:${entry.payload.uri}:${threadKey}`;
             return `chanty:${account.accountId}:${entry.payload.uri}`;
-            //return entry.payload.uri
         },
         shouldDebounce: (entry) => {
-            /* if (entry.post.file_ids && entry.post.file_ids.length > 0) {
-              return false;
-            }
-            const text = normalizeOptionalString(entry.post.message) ?? "";
-            if (!text) {
-              return false;
-            }
-            return !core.channel.commands.isControlCommandMessage(text, cfg); */
             return true;
         },
         onFlush: async (entries) => {
@@ -1851,25 +1008,9 @@ export async function monitorChantyProvider(opts = {}) {
                 return;
             }
             entries.forEach(async () => {
-                await handlePost(/* last.post, */ last.payload);
+                await handlePost(last.payload);
             });
             return;
-            // @todo merge posts
-            /* if (entries.length === 1) {
-              await handlePost(last.post, last.payload);
-              return;
-            }
-            const combinedText = entries
-              .map((entry) => normalizeOptionalString(entry.payload.text) ?? "")
-              .filter(Boolean)
-              .join("\n");
-            const mergedPost: ChantyPost = {
-              ...last.payload,
-              message: combinedText,
-              file_ids: [],
-            };
-            const ids = entries.map((entry) => entry.payload.uri).filter(Boolean);
-            await handlePost(mergedPost, last.payload, ids.length > 0 ? ids : undefined); */
         },
         onError: (err) => {
             runtime.error?.(`chanty debounce flush failed: ${String(err)}`);
@@ -1880,16 +1021,11 @@ export async function monitorChantyProvider(opts = {}) {
     const connectOnce = createChantyConnectOnce({
         wsUrl,
         client,
-        //botToken,
         abortSignal: opts.abortSignal,
         statusSink: opts.statusSink,
         runtime,
         webSocketFactory: opts.webSocketFactory,
         nextSeq: () => seq++,
-        /* getBotUpdateAt: async () => {
-          const me = await fetchChantyMe(client);
-          return me.update_at ?? 0;
-        }, */
         onPosted: async (payload) => {
             await debouncer.enqueue({ payload });
         },
@@ -1897,36 +1033,6 @@ export async function monitorChantyProvider(opts = {}) {
             await handleReactionEvent(payload);
         },
     });
-    /* let slashShutdownCleanup: Promise<void> | null = null;
-  
-    // Clean up slash commands on shutdown
-    if (slashEnabled) {
-      const runAbortCleanup = () => {
-        if (slashShutdownCleanup) {
-          return;
-        }
-        // Snapshot registered commands before deactivating state.
-        // This listener may run concurrently with startup in a new process, so we keep
-        // monitor shutdown alive until the remote cleanup completes.
-        const commands = getSlashCommandState(account.accountId)?.registeredCommands ?? [];
-        // Deactivate state immediately to prevent new local dispatches during teardown.
-        deactivateSlashCommands(account.accountId);
-  
-        slashShutdownCleanup = cleanupSlashCommands({
-          client,
-          commands,
-          log: (msg) => runtime.log?.(msg),
-        }).catch((err: unknown) => {
-          runtime.error?.(`chanty: slash cleanup failed: ${String(err)}`);
-        });
-      };
-  
-      if (opts.abortSignal?.aborted) {
-        runAbortCleanup();
-      } else {
-        opts.abortSignal?.addEventListener("abort", runAbortCleanup, { once: true });
-      }
-    } */
     try {
         await runWithReconnect(connectOnce, {
             abortSignal: opts.abortSignal,
@@ -1941,10 +1047,5 @@ export async function monitorChantyProvider(opts = {}) {
         });
     }
     finally {
-        // unregisterInteractions?.();
     }
-    /* const slashShutdownCleanupPromise = slashShutdownCleanup;
-    if (slashShutdownCleanupPromise) {
-      await Promise.resolve(slashShutdownCleanupPromise);
-    } */
 }

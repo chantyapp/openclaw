@@ -1,4 +1,3 @@
-// Chanty plugin module implements monitor resources behavior.
 import { formatInboundMediaUnavailableText } from "openclaw/plugin-sdk/channel-inbound";
 import { asDateTimestampMs, resolveExpiresAtMsFromDurationMs, } from "openclaw/plugin-sdk/number-runtime";
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -106,36 +105,10 @@ export function createChantyMonitorResources(params) {
             return null;
         }
     };
-    /* const buildModelPickerProps = (
-      channelId: string,
-      buttons: Array<unknown>,
-    ): Record<string, unknown> | undefined =>
-      buildButtonProps({
-        callbackUrl,
-        accountId,
-        channelId,
-        buttons,
-      }); */
-    /* const updateModelPickerPost = async (paramsLocal: {
-      channelId: string;
-      postId: string;
-      message: string;
-      buttons?: Array<unknown>;
-    }): Promise<ChantyInteractionResponse> => {
-      const props = buildModelPickerProps(paramsLocal.channelId, paramsLocal.buttons ?? []) ?? {
-        attachments: [],
-      };
-      await updateChantyPost(client, paramsLocal.postId, {
-        message: paramsLocal.message,
-        props,
-      });
-      return {};
-    }; */
     return {
         resolveChantyMedia,
         sendTypingIndicator,
         resolveChannelInfo,
         resolveUserInfo,
-        // updateModelPickerPost,
     };
 }

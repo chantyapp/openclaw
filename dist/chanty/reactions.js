@@ -1,4 +1,3 @@
-// Chanty plugin module implements reactions behavior.
 import { asDateTimestampMs, resolveExpiresAtMsFromDurationMs, } from "openclaw/plugin-sdk/number-runtime";
 import { isPrivateNetworkOptInEnabled } from "openclaw/plugin-sdk/ssrf-runtime";
 import { resolveChantyAccount } from "./accounts.js";

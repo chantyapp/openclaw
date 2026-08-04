@@ -1,4 +1,3 @@
-// Chanty plugin module implements gateway auth bypass behavior.
 const DEFAULT_SLASH_CALLBACK_PATH = "/api/channels/chanty/command";
 function readTrimmedString(value) {
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -29,7 +28,6 @@ export function collectChantySlashCallbackPaths(raw) {
             }
         }
         catch {
-            // Keep the normalized callback path when the configured URL is invalid.
         }
     }
     return [...paths];
