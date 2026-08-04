@@ -300,7 +300,6 @@ export async function monitorChantyProvider(opts = {}) {
         botToken,
         allowPrivateNetwork: isPrivateNetworkOptInEnabled(account.config),
     });
-    console.log(client);
     // Wait for the Chanty API to accept our bot token before proceeding.
     // When a bot account is disabled and re-enabled, the session is invalidated
     // and API calls return 401 until the account is fully active again.  Retrying
@@ -324,7 +323,6 @@ export async function monitorChantyProvider(opts = {}) {
     if (opts.abortSignal?.aborted) {
         return;
     }
-    console.log('foo', botUser);
     const botUserId = botUser?.user?.jid;
     const botUsername = normalizeOptionalString(botUser?.user?.name);
     runtime.log?.(`chanty connected as ${botUserId}`);
@@ -642,7 +640,6 @@ export async function monitorChantyProvider(opts = {}) {
         saveRemoteMedia: (params) => core.channel.media.saveRemoteMedia(params),
         mediaKindFromMime: (contentType) => core.media.mediaKindFromMime(contentType),
     });
-    console.log(1111111);
     /* const runModelPickerCommand = async (params: {
       commandText: string;
       commandAuthorized: boolean;
@@ -1023,7 +1020,6 @@ export async function monitorChantyProvider(opts = {}) {
     // post: ChantyPost,
     payload, messageIds) => {
         const post = { ...payload };
-        console.log(1211, 'got message', payload.uri);
         const channelId = post.convJid; //post.channel_id ?? payload.data?.channel_id ?? payload.broadcast?.channel_id;
         if (!channelId) {
             logVerboseMessage("chanty: drop post (missing channel id)");
@@ -1034,23 +1030,19 @@ export async function monitorChantyProvider(opts = {}) {
             logVerboseMessage("chanty: drop post (missing message id)");
             return;
         }
-        console.log(333);
         const replayResult = await processChantyReplayGuardedPost({
             accountId: account.accountId,
             messageIds: allMessageIds,
             handlePost: async () => {
-                console.log(1);
                 const senderId = post.createdBy.jid; // post.user_id ?? payload.broadcast?.user_id;
                 if (!senderId) {
                     logVerboseMessage("chanty: drop post (missing sender id)");
                     return;
                 }
-                console.log(2);
                 if (senderId === botUserId) {
                     logVerboseMessage(`chanty: drop post (self sender=${senderId})`);
                     return;
                 }
-                console.log(3);
                 if (post.msgType !== 'chat') {
                     return;
                 }
@@ -1058,7 +1050,6 @@ export async function monitorChantyProvider(opts = {}) {
                   logVerboseMessage(`chanty: drop post (system post type=${post.type ?? "unknown"})`);
                   return;
                 } */
-                console.log(4);
                 const channelInfo = {}; //await resolveChannelInfo(channelId);
                 const channelType = payload.convType;
                 /* normalizeOptionalString(channelInfo?.type) ??
@@ -1075,17 +1066,13 @@ export async function monitorChantyProvider(opts = {}) {
                   normalizeOptionalString(payload.data?.sender_name) ??
                   normalizeOptionalString((await resolveUserInfo(senderId))?.username) ??
                   senderId; */
-                console.log(4, senderName, senderId);
                 const rawPostText = post.text; //typeof post.message === "string" ? post.message : "";
-                console.log(5, rawPostText);
                 const rawText = normalizeOptionalString(rawPostText) ?? "";
-                console.log(5);
                 const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
                     cfg,
                     surface: "chanty",
                 });
                 const isControlCommand = false; //allowTextCommands && core.channel.commands.isControlCommandMessage(rawText, cfg);
-                console.log(5, allowTextCommands, isControlCommand);
                 const accessDecision = await resolveChantyMonitorInboundAccess({
                     account,
                     cfg,
@@ -1101,7 +1088,6 @@ export async function monitorChantyProvider(opts = {}) {
                     mayPair: true,
                 });
                 const commandAuthorized = accessDecision.commandAccess.authorized;
-                console.log(6, accessDecision);
                 /*
                 if (accessDecision.ingress.decision !== "allow") {
                   if (kind === "direct") {
@@ -1189,8 +1175,6 @@ export async function monitorChantyProvider(opts = {}) {
                         id: kind === "direct" ? senderId : channelId,
                     },
                 });
-                console.log(route);
-                console.log(4444);
                 const baseSessionKey = route.sessionKey;
                 const threadRootId = normalizeOptionalString(post.root_id);
                 const replyToMode = resolveChantyReplyToMode(account, kind);
@@ -1278,7 +1262,6 @@ export async function monitorChantyProvider(opts = {}) {
                   recordPendingHistory();
                   return;
                 } */
-                console.log(555);
                 const fileIds = uniqueStrings(normalizeTrimmedStringList(post.file_ids ?? []));
                 const mediaList = await resolveChantyMedia(fileIds);
                 const mediaPlaceholder = buildChantyAttachmentPlaceholder(mediaList);
@@ -1291,12 +1274,10 @@ export async function monitorChantyProvider(opts = {}) {
                     mediaCount: mediaList.length,
                 });
                 const bodyText = normalizeMention(baseText, botUsername);
-                console.log(666, bodyText);
                 if (shouldDropEmptyChantyBody({ bodyText, rawText: rawPostText, botUsername })) {
                     logVerboseMessage(`chanty: drop message (empty body after normalization channel=${channelId} sender=${senderId} wasMentioned=${wasMentioned})`);
                     return;
                 }
-                console.log(777);
                 // Mention-only turns need non-empty agent text; the shared reply runner rejects empty
                 // bodies before model invocation. The guard above ensures this fallback is a bot mention.
                 const bodyForAgent = bodyText || rawText.trim();
@@ -1738,7 +1719,6 @@ export async function monitorChantyProvider(opts = {}) {
                 }
             },
         });
-        console.log(333, 'replayResult', replayResult);
         if (replayResult === "duplicate") {
             logVerboseMessage(`chanty: drop post (dedupe account=${account.accountId} ids=${allMessageIds.length})`);
         }
@@ -1863,12 +1843,10 @@ export async function monitorChantyProvider(opts = {}) {
               return false;
             }
             return !core.channel.commands.isControlCommandMessage(text, cfg); */
-            console.log('shouldDebounce', entry);
             return true;
         },
         onFlush: async (entries) => {
             const last = entries.at(-1);
-            console.log('onFlush', entries);
             if (!last) {
                 return;
             }
@@ -1898,7 +1876,6 @@ export async function monitorChantyProvider(opts = {}) {
         },
     });
     const wsUrl = buildChantyWsUrl(botUser, botToken);
-    console.log(botUser, wsUrl);
     let seq = 1;
     const connectOnce = createChantyConnectOnce({
         wsUrl,
@@ -1959,7 +1936,6 @@ export async function monitorChantyProvider(opts = {}) {
                 opts.statusSink?.({ lastError: String(err), connected: false });
             },
             onReconnect: (delayMs) => {
-                console.log(botUser, wsUrl);
                 runtime.log?.(`chanty reconnecting in ${Math.round(delayMs / 1000)}s`);
             },
         });

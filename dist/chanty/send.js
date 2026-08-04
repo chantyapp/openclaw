@@ -187,7 +187,6 @@ function mergeDmRetryOptions(base, override) {
     return merged;
 }
 async function resolveTargetChannelId(params) {
-    console.log(333, params);
     return params.target?.name;
     /* if (params.target.kind === "channel") {
       return params.target.id;
@@ -298,12 +297,10 @@ async function resolveChantySendContext(to, opts) {
     };
 }
 export async function sendMessageChanty(to, text, opts) {
-    console.log(2222, to, text, opts);
     const core = getCore();
     const logger = core.logging.getChildLogger({ module: "chanty" });
     try {
         const { cfg, accountId, token, baseUrl, channelId, allowPrivateNetwork } = await resolveChantySendContext(to, opts);
-        console.log(2222, 1);
         const client = createChantyClient({ baseUrl, botToken: token, allowPrivateNetwork });
         let props = opts.props;
         /* if (!props && Array.isArray(opts.buttons) && opts.buttons.length > 0) {
@@ -322,9 +319,7 @@ export async function sendMessageChanty(to, text, opts) {
             text: opts.attachmentText,
           });
         } */
-        console.log(2222, 2);
         let message = normalizeOptionalString(text) ?? "";
-        console.log(2222, 3, message);
         let fileIds;
         let uploadError;
         const mediaUrl = opts.mediaUrl?.trim();

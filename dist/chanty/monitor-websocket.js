@@ -14,7 +14,6 @@ function parseChantyEventPayload(raw) {
 }
 function parseChantyPost(value) {
     // @todo
-    console.log('parseChantyPost', value);
     return {};
     /* if (typeof value === "string") {
       return safeParseJsonWithSchema(ChantyPostSchema, value);
@@ -112,11 +111,9 @@ export function createChantyConnectOnce(opts) {
                     }, pongTimeoutMs); */
                     try {
                         const p = `ping:${new Date().getTime()}`;
-                        console.log(p);
                         ws.send(p);
                     }
                     catch (err) {
-                        console.log(111, err);
                         if (!protocolKeepaliveEnabled || settled) {
                             return;
                         }
@@ -126,7 +123,6 @@ export function createChantyConnectOnce(opts) {
                     }
                 };
                 const scheduleProtocolPing = () => {
-                    console.log('protocolKeepaliveEnabled', protocolKeepaliveEnabled, 'settled', settled);
                     if (!protocolKeepaliveEnabled || settled || protocolPingInterval !== undefined) {
                         return;
                     }
@@ -250,7 +246,6 @@ export function createChantyConnectOnce(opts) {
                     });
                     const raw = rawDataToString(data);
                     const payload = parseChantyEventPayload(raw);
-                    console.log('ws payload', payload);
                     if (!payload) {
                         return;
                     }
@@ -326,10 +321,9 @@ export function createChantyConnectOnce(opts) {
             });
         }
         catch (e) {
-            console.log(e);
+            console.warn(e);
         }
         finally {
-            console.log('abort');
             opts.abortSignal?.removeEventListener("abort", onAbort);
         }
     };

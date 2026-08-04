@@ -132,7 +132,6 @@ export function createChantyClient(params) {
         if (typeof init?.body === "string" && !headers.has("Content-Type")) {
             headers.set("Content-Type", "application/json");
         }
-        console.log({ ...init, headers, method: 'POST' });
         const res = await fetchImpl(url, { ...init, headers, method: 'POST' });
         if (!res.ok) {
             const detail = await readChantyError(res);
@@ -154,11 +153,9 @@ export async function fetchChantyMe(client) {
     return (await client.request("/api/oauth2/user/auth/get"))?.data;
 }
 export async function fetchChantyUser(client, userId) {
-    console.log(1111, 'fetchChantyUser', userId);
     return await client.request(`/users/${userId}`);
 }
 export async function fetchChantyUserByUsername(client, username) {
-    console.log(1111, 'fetchChantyUserByUsername', username);
     return await client.request(`/users/username/${encodeURIComponent(username)}`);
 }
 export async function fetchChantyChannel(client, channelId) {
@@ -168,7 +165,6 @@ export async function fetchChantyChannelByName(client, teamId, channelName) {
     return await client.request(`/teams/${teamId}/channels/name/${encodeURIComponent(channelName)}`);
 }
 export async function sendChantyTyping(client, params) {
-    console.log(1111, 'sendChantyTyping', params);
     /* const payload: Record<string, string> = {
       channel_id: params.channelId,
     };
@@ -409,7 +405,6 @@ function readErrorCode(error) {
     return undefined;
 }
 export async function createChantyPost(client, params) {
-    console.log('!1111111111', 'createChantyPost1', params);
     const payload = {
         channel_id: params.channelId,
         message: params.message,
@@ -433,11 +428,9 @@ export async function createChantyPost(client, params) {
     });
 }
 export async function fetchChantyUserTeams(client, userId) {
-    console.log(1111, 'fetchChantyUserTeams', userId);
     return await client.request(`/users/${userId}/teams`);
 }
 export async function updateChantyPost(client, postId, params) {
-    console.log('!!!!!! ', 'updateChantyPost', postId, params);
     const payload = { id: postId };
     if (params.message !== undefined) {
         payload.message = params.message;
@@ -451,7 +444,6 @@ export async function updateChantyPost(client, postId, params) {
     });
 }
 export async function deleteChantyPost(client, postId) {
-    console.log('!!!!', 'deleteChantyPost', postId);
     await client.request(`/posts/${postId}`, {
         method: "DELETE",
     });
